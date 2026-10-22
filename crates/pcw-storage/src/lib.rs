@@ -1,9 +1,10 @@
-//! PC-Watcher storage: SQLite schema v1 and the write path.
-//!
-//! Read path (`read.rs`), retention pruning (`prune.rs`) and export are
-//! separate modules (plan Tasks 5–8).
+//! PC-Watcher storage: SQLite schema v1, the write path and the read path
+//! (queries, PTR-worker support and streaming export readers). Retention
+//! pruning (`prune.rs`) and export are separate modules (plan Tasks 6–8).
 
+mod read;
 mod schema;
 mod write;
 
+pub use read::{ConnFilter, ConnectionRow, DestinationRow, OverviewSummary, UsageSummary};
 pub use write::{SharedStore, StorageError, Store, WriteOp};

@@ -225,6 +225,7 @@ version = "0.1.0"
 dependencies = [
  "pcw-types",
  "rusqlite",
+ "serde",
  "tempfile",
  "thiserror",
 ]

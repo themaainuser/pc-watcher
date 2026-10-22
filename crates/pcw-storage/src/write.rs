@@ -333,6 +333,17 @@ impl Store {
     pub fn conn_for_tests(&mut self) -> &mut Connection {
         &mut self.conn
     }
+
+    /// Read-only handle on the connection for the sibling read module, so the
+    /// private field stays private.
+    pub(crate) fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
+    /// Whether this store may write (`open` = true, `open_readonly` = false).
+    pub(crate) fn writable(&self) -> bool {
+        self.writable
+    }
 }
 
 /// Writes one connection event and keeps the open-TCP map in step (§4.4).
@@ -447,7 +458,7 @@ fn storage_error(err: rusqlite::Error) -> StorageError {
 
 /// The same failure SQLite reports for a write attempt in `mode=ro`, produced
 /// before a doomed transaction is even opened.
-fn readonly_error() -> StorageError {
+pub(crate) fn readonly_error() -> StorageError {
     StorageError::Sqlite(rusqlite::Error::SqliteFailure(
         rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_READONLY),
         Some("attempt to write a readonly database".to_string()),
@@ -456,7 +467,7 @@ fn readonly_error() -> StorageError {
 
 /// Every statement in the hot path goes through this so SQLITE_FULL is always
 /// recognized as [`StorageError::DiskFull`], not only at `commit`.
-trait SqlResultExt<T> {
+pub(crate) trait SqlResultExt<T> {
     fn se(self) -> Result<T, StorageError>;
 }
 

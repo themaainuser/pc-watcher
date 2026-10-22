@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 rusqlite = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
 pcw-types = { path = "../pcw-types" }
 
