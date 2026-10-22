@@ -5,3 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+rusqlite = { workspace = true }
+thiserror = { workspace = true }
+pcw-types = { path = "../pcw-types" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
