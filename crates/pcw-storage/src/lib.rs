@@ -2,6 +2,7 @@
 //! (queries, PTR-worker support and streaming export readers). Retention
 //! pruning (`prune.rs`) and export are separate modules (plan Tasks 6–8).
 
+mod prune;
 mod read;
 mod schema;
 mod write;

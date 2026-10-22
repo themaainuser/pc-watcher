@@ -340,6 +340,12 @@ impl Store {
         &self.conn
     }
 
+    /// Mutable handle on the connection for the sibling prune module (a
+    /// transaction needs `&mut Connection`).
+    pub(crate) fn conn_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+
     /// Whether this store may write (`open` = true, `open_readonly` = false).
     pub(crate) fn writable(&self) -> bool {
         self.writable
