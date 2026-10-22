@@ -276,6 +276,8 @@ dependencies = [
 name = "pcw-foreground"
 version = "0.1.0"
 dependencies = [
+ "pcw-types",
+ "serde",
  "windows",
 ]
 
