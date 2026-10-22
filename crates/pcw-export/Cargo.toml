@@ -5,3 +5,13 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+csv = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+time = { workspace = true }
+thiserror = { workspace = true }
+pcw-types = { path = "../pcw-types" }
+pcw-storage = { path = "../pcw-storage" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
