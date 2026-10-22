@@ -255,3 +255,99 @@ fn never_prunes_hostname_cache() {
         "the hostname cache survives a full prune"
     );
 }
+
+/// Schema guard: SQLite row ids must never be reused after the pruner
+/// empties a table. With plain `INTEGER PRIMARY KEY` a fresh row would
+/// inherit a freed id (1 ≤ old max), which hides it from the next export
+/// (`id > watermark`) and lets the pruner delete it once aged — unexported
+/// data loss, forbidden by spec §4.7. AUTOINCREMENT closes that hole.
+#[test]
+fn row_ids_never_reuse_after_full_prune() {
+    let (_dir, mut store) = open();
+    let now = now_ms();
+    let ts = (now - 11 * DAY_MS) as i64;
+    seed_table(&mut store, "connections", 3, ts);
+    seed_table(&mut store, "app_sessions", 3, ts);
+    seed_table(&mut store, "window_titles", 3, ts);
+    set_watermarks(&mut store, "3");
+
+    // Prune every eligible row until all three tables are empty.
+    loop {
+        if store.prune_step(10, now, 1000).unwrap() == 0 {
+            break;
+        }
+    }
+    for table in ["connections", "app_sessions", "window_titles"] {
+        assert_eq!(count(&mut store, table), 0, "{table} empty");
+    }
+
+    // New rows must get ids above the seed ids (1..=3), never id 1 again.
+    seed_table(&mut store, "connections", 1, now as i64);
+    seed_table(&mut store, "app_sessions", 1, now as i64);
+    seed_table(&mut store, "window_titles", 1, now as i64);
+    assert_eq!(
+        ids(&mut store, "connections"),
+        vec![4],
+        "connections id must be > old max (3)"
+    );
+    assert_eq!(
+        ids(&mut store, "app_sessions"),
+        vec![4],
+        "app_sessions id must be > old max (3)"
+    );
+    assert_eq!(
+        ids(&mut store, "window_titles"),
+        vec![4],
+        "window_titles id must be > old max (3)"
+    );
+}
+
+/// The age clause must actually be applied: with a single watermark covering
+/// both old and new rows, only the rows past retention go — 11-day-old rows
+/// delete while 1-day-old exported rows with higher ids survive.
+#[test]
+fn mixed_age_exported_rows_prune_selectively() {
+    let (_dir, mut store) = open();
+    let now = now_ms();
+    seed_table(&mut store, "connections", 3, (now - 11 * DAY_MS) as i64);
+    seed_table(&mut store, "app_sessions", 3, (now - 11 * DAY_MS) as i64);
+    seed_table(&mut store, "window_titles", 3, (now - 11 * DAY_MS) as i64);
+    seed_table(&mut store, "connections", 3, (now - DAY_MS) as i64);
+    seed_table(&mut store, "app_sessions", 3, (now - DAY_MS) as i64);
+    seed_table(&mut store, "window_titles", 3, (now - DAY_MS) as i64);
+    // One watermark at the max id covers old and fresh rows alike.
+    set_watermarks(&mut store, "6");
+
+    let deleted = store.prune_step(10, now, 1000).unwrap();
+    assert_eq!(
+        deleted, 9,
+        "3 tables x 3 eleven-day-old rows; the 1-day rows stay"
+    );
+    assert_eq!(ids(&mut store, "connections"), vec![4, 5, 6]);
+    assert_eq!(ids(&mut store, "app_sessions"), vec![4, 5, 6]);
+    assert_eq!(ids(&mut store, "window_titles"), vec![4, 5, 6]);
+}
+
+/// The age predicate is strictly `<`: a row whose timestamp is exactly the
+/// retention cutoff survives; only rows older than that are eligible.
+#[test]
+fn rows_at_exact_cutoff_survive() {
+    let (_dir, mut store) = open();
+    let now = now_ms();
+    let cutoff = (now - 10 * DAY_MS) as i64;
+    // Per table, id 1 is one millisecond past the cutoff (deletable)…
+    seed_table(&mut store, "connections", 1, cutoff - 1);
+    seed_table(&mut store, "app_sessions", 1, cutoff - 1);
+    seed_table(&mut store, "window_titles", 1, cutoff - 1);
+    // …and id 2 is exactly at the cutoff (must survive).
+    seed_table(&mut store, "connections", 1, cutoff);
+    seed_table(&mut store, "app_sessions", 1, cutoff);
+    seed_table(&mut store, "window_titles", 1, cutoff);
+    set_watermarks(&mut store, "2");
+
+    let deleted = store.prune_step(10, now, 1000).unwrap();
+    assert_eq!(deleted, 3, "cutoff − 1 ms deletes, cutoff itself survives");
+    assert_eq!(ids(&mut store, "connections"), vec![2]);
+    assert_eq!(ids(&mut store, "app_sessions"), vec![2]);
+    assert_eq!(ids(&mut store, "window_titles"), vec![2]);
+}

@@ -254,18 +254,18 @@ Schema (v1). All timestamps are Unix epoch milliseconds (UTC).
 
 ```
 connections(
-  id INTEGER PK, ts_first INT, ts_last INT,
+  id INTEGER PK AUTOINCREMENT, ts_first INT, ts_last INT,
   pid INT, process_name TEXT, process_path TEXT,
   remote_ip TEXT, remote_port INT, local_port INT,
   protocol TEXT,              -- 'tcp' | 'udp'
   direction TEXT              -- 'out' | 'in'
 )
 app_sessions(
-  id INTEGER PK, ts_start INT, ts_end INT,
+  id INTEGER PK AUTOINCREMENT, ts_start INT, ts_end INT,
   process_name TEXT, window_title TEXT      -- title when the session opened
 )
 window_titles(
-  id INTEGER PK, ts INT, process_name TEXT, title TEXT
+  id INTEGER PK AUTOINCREMENT, ts INT, process_name TEXT, title TEXT
 )
 hostnames(
   ip TEXT PK, hostname TEXT NULL,
@@ -279,6 +279,10 @@ meta(key TEXT PK, value TEXT)  -- schema version, export watermarks, counters,
 Indexes: `connections(process_name, ts_first)`, `connections(remote_ip)`,
 `connections(ts_first)`, `app_sessions(process_name, ts_start)`,
 `window_titles(ts)`, `window_titles(process_name, ts)`, `hostnames(source)`.
+
+AUTOINCREMENT (added 2026-10-22) is required by the §4.7 watermark guarantee:
+plain `INTEGER PRIMARY KEY` reuses row ids after the pruner empties a table,
+which would hide new rows from export and let the pruner delete unexported data.
 
 **Estimated footprint:** TCP rows, sessions and titles: ~15–60 MB/day.
 Per-datagram UDP adds roughly 150–250 bytes per datagram (row + indexes). A

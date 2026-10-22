@@ -4,7 +4,7 @@
 
 pub(crate) const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS connections(
-  id INTEGER PRIMARY KEY,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts_first INT, ts_last INT,
   pid INT, process_name TEXT, process_path TEXT,
   remote_ip TEXT, remote_port INT, local_port INT,
@@ -13,12 +13,12 @@ CREATE TABLE IF NOT EXISTS connections(
 );
 
 CREATE TABLE IF NOT EXISTS app_sessions(
-  id INTEGER PRIMARY KEY, ts_start INT, ts_end INT,
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts_start INT, ts_end INT,
   process_name TEXT, window_title TEXT      -- title when the session opened
 );
 
 CREATE TABLE IF NOT EXISTS window_titles(
-  id INTEGER PRIMARY KEY, ts INT, process_name TEXT, title TEXT
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts INT, process_name TEXT, title TEXT
 );
 
 CREATE TABLE IF NOT EXISTS hostnames(
