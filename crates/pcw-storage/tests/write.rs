@@ -308,3 +308,54 @@ fn disk_full_is_reported_and_store_stays_usable() {
         .unwrap();
     assert_eq!(count(&mut store, "connections"), 1);
 }
+
+#[test]
+fn disk_full_batch_leaves_no_in_memory_residue() {
+    let (_dir, mut store) = store();
+
+    {
+        let conn = store.conn_for_tests();
+        let pages: i64 = conn
+            .query_row("PRAGMA page_count", [], |r| r.get(0))
+            .unwrap();
+        conn.execute_batch(&format!("PRAGMA max_page_count = {};", pages + 1))
+            .unwrap();
+    }
+
+    // The failing batch: a TCP Open for a never-seen key plus Packets to a
+    // never-seen IP, so the writer has already touched its open map and
+    // seen-IP set when the disk runs out mid-batch.
+    let mut batch = vec![tcp(EventKind::Open, 2000, 1234, "10.0.0.9", 443)];
+    batch.extend((0..5000).map(|i| udp(2000 + i as u64, "10.9.9.9", 5000)));
+    let err = store.apply_batch(&batch, 7000).unwrap_err();
+    assert!(matches!(err, StorageError::DiskFull), "got {err:?}");
+
+    store
+        .conn_for_tests()
+        .execute_batch("PRAGMA max_page_count = 99999999;")
+        .unwrap();
+
+    // Re-applying the SAME Open must insert a row: had the failed batch's
+    // open-map entry survived, this Open would be ignored as a duplicate.
+    store
+        .apply_batch(&[tcp(EventKind::Open, 2000, 1234, "10.0.0.9", 443)], 8000)
+        .unwrap();
+    assert_eq!(count(&mut store, "connections"), 1);
+
+    // The never-seen IP must also be unknown again: a fresh Packet gets a
+    // pending hostnames row (had `seen_ips` kept the failed batch's entry,
+    // nothing would be inserted here).
+    store
+        .apply_batch(&[udp(9000, "10.9.9.9", 5000)], 9000)
+        .unwrap();
+    let (hostname, source): (Option<String>, String) = store
+        .conn_for_tests()
+        .query_row(
+            "SELECT hostname, source FROM hostnames WHERE ip = '10.9.9.9'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(hostname, None);
+    assert_eq!(source, "pending");
+}

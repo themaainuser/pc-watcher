@@ -5,7 +5,7 @@
 //! seen-IP set and the DNS name map (ip → name, capped). All three start
 //! empty on `open()`.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque, hash_map::Entry};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -23,7 +23,8 @@ const OPEN_MAP_LIFETIME_MS: u64 = 24 * 3_600_000;
 const SWEEP_INTERVAL_MS: u64 = 3_600_000;
 /// Seen-IP set is cleared when it reaches this size.
 const SEEN_IP_CAP: usize = 100_000;
-/// DNS name map: keep the 50,000 most recently answered names, oldest dropped.
+/// DNS map cap: when reached, the first-inserted (oldest by insertion) name
+/// is evicted on the next new entry; refreshes keep their position.
 const DNS_MAP_CAP: usize = 50_000;
 const BUSY_TIMEOUT_MS: u64 = 5000;
 const SCHEMA_VERSION: &str = "1";
@@ -124,17 +125,23 @@ impl State {
     /// "oldest" is by first insertion. Eviction pops from the front of
     /// `dns_order`; a refreshed key only moves its name, not its position.
     fn dns_insert(&mut self, ip: String, name: String) {
-        if self.dns_names.contains_key(&ip) {
-            self.dns_names.insert(ip, name);
-            return;
-        }
-        if self.dns_names.len() >= DNS_MAP_CAP {
-            if let Some(oldest) = self.dns_order.pop_front() {
-                self.dns_names.remove(&oldest);
+        match self.dns_names.entry(ip) {
+            Entry::Occupied(mut slot) => {
+                // A refreshed name keeps its original position.
+                slot.insert(name);
+            }
+            Entry::Vacant(slot) => {
+                let ip = slot.key().clone();
+                drop(slot); // release the map borrow; eviction mutates both maps
+                if self.dns_names.len() >= DNS_MAP_CAP {
+                    if let Some(oldest) = self.dns_order.pop_front() {
+                        self.dns_names.remove(&oldest);
+                    }
+                }
+                self.dns_order.push_back(ip.clone());
+                self.dns_names.insert(ip, name);
             }
         }
-        self.dns_order.push_back(ip.clone());
-        self.dns_names.insert(ip, name);
     }
 
     /// Drops open-map keys with no close for 24 h; checked at most once an
@@ -162,7 +169,15 @@ impl Store {
     pub fn open(path: &Path) -> Result<Store, StorageError> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(StorageError::from)?;
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    StorageError::Sqlite(rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+                        Some(format!(
+                            "cannot create database directory {}: {e}",
+                            parent.display()
+                        )),
+                    ))
+                })?;
             }
         }
         let conn = Connection::open(path)?;
@@ -180,9 +195,13 @@ impl Store {
         Self::initialize(conn, false)
     }
 
-    /// Common connection setup. A read-only store skips schema/pragma writes:
+    /// Common connection setup. Both read/write and read-only stores get a 5 s
+    /// busy timeout so readers queue behind the writer instead of failing with
+    /// SQLITE_BUSY. A read-only store skips schema/pragma writes:
     /// `PRAGMA journal_mode=WAL` would be a write it cannot perform.
     fn initialize(conn: Connection, writable: bool) -> Result<Store, StorageError> {
+        conn.busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))
+            .se()?;
         let store = Store {
             conn,
             writable,
@@ -191,13 +210,19 @@ impl Store {
         if !writable {
             return Ok(store);
         }
-        store
-            .conn
-            .busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))?;
         // journal_mode is a query pragma; it returns the resulting mode.
-        let _journal_mode: String = store
+        let journal_mode: String = store
             .conn
-            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+            .se()?;
+        if !journal_mode.eq_ignore_ascii_case("wal") {
+            return Err(StorageError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                Some(format!(
+                    "could not enable WAL mode (journal_mode = {journal_mode})"
+                )),
+            )));
+        }
         store.conn.execute_batch(SCHEMA)?;
         store
             .conn
@@ -276,8 +301,10 @@ impl Store {
             return Err(readonly_error());
         }
         self.conn
-            .prepare_cached(SQL_SET_META)?
-            .execute(params![key, val])?;
+            .prepare_cached(SQL_SET_META)
+            .se()?
+            .execute(params![key, val])
+            .se()?;
         Ok(())
     }
 
@@ -294,8 +321,10 @@ impl Store {
             return Err(readonly_error());
         }
         self.conn
-            .prepare_cached(SQL_DELETE_META)?
-            .execute(params![key])?;
+            .prepare_cached(SQL_DELETE_META)
+            .se()?
+            .execute(params![key])
+            .se()?;
         Ok(())
     }
 
@@ -317,12 +346,11 @@ fn apply_connection(
     match ev.kind {
         EventKind::Open if ev.protocol == Protocol::Tcp => {
             let key = tcp_key(ev);
-            if state.open.contains_key(&key) {
+            if let Entry::Vacant(slot) = state.open.entry(key) {
                 // Duplicate open (start-up snapshot plus live event): ignored.
-            } else {
                 insert_connection(tx, ev)?;
                 let id = tx.last_insert_rowid();
-                state.open.insert(key, (id, ev.ts_ms));
+                slot.insert((id, ev.ts_ms));
                 *rows += 1;
             }
         }
@@ -357,7 +385,7 @@ fn apply_connection(
     // First time this IP is seen since the last clear: record it with its DNS
     // name if the in-memory map has one, else leave it for the PTR worker.
     if state.note_ip(&ev.remote_ip) {
-        insert_hostname(tx, &ev.remote_ip, state.dns_name(&ev.remote_ip), now_ms)?;
+        *rows += insert_hostname(tx, &ev.remote_ip, state.dns_name(&ev.remote_ip), now_ms)?;
     }
     Ok(())
 }
@@ -392,8 +420,8 @@ fn insert_hostname(
     ip: &str,
     name: Option<&str>,
     now_ms: u64,
-) -> Result<(), StorageError> {
-    match name {
+) -> Result<u64, StorageError> {
+    let n = match name {
         Some(name) => tx
             .prepare_cached(SQL_INSERT_HOSTNAME_NAMED)
             .se()?
@@ -405,7 +433,7 @@ fn insert_hostname(
             .execute(params![ip])
             .se()?,
     };
-    Ok(())
+    Ok(n as u64)
 }
 
 /// Maps a `rusqlite::Error`, recognizing SQLITE_FULL as the disk-full condition.
