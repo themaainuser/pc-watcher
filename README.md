@@ -47,6 +47,27 @@ linker = "rust-lld"
 No external `lld-link` install is required; `rust-lld` acts as the MSVC
 `link.exe` compatible driver here.
 
+## Foreground hooks smoke test (manual)
+
+The Win32 hook adapter in `crates/pcw-foreground` needs an interactive desktop
+session. Verify it by hand with:
+
+```powershell
+cargo test -p pcw-foreground --test os_smoke -- --ignored --nocapture
+```
+
+Then, during the 90-second window it prints signals for:
+
+- [ ] Alt-tab between two apps → a `Foreground` signal with the process name
+      and window title for each switch.
+- [ ] Switch browser tabs (or documents) in the focused app → a `Title`
+      signal for each tab.
+- [ ] Win+L → `Locked`; after sign-in → `Unlocked`.
+- [ ] Turn the display off (short `powercfg` timeout, or closing the lid with
+      "do nothing" as the lid action) → `DisplayOff`; when the display turns
+      back on → `DisplayOn`.
+- [ ] Idle at the desktop (no interaction) → no signals at all.
+
 ## OneDrive rule
 
 The project deliberately lives **outside** any OneDrive / cloud-sync folder
