@@ -5,3 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+dns-lookup = { workspace = true }
+thiserror = { workspace = true }
+pcw-storage = { path = "../pcw-storage" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+pcw-types = { path = "../pcw-types" }
