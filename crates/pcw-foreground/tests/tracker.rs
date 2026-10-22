@@ -236,9 +236,11 @@ fn same_process_foreground_change_is_title_not_session() {
     let mut out = tr.on_signal(fg(0, "a.exe", ""));
     out.extend(tr.on_signal(fg(3000, "a.exe", "other")));
     out.extend(tr.finalize(9000));
-    let ss = sessions(out);
-    assert_eq!(ss.len(), 1);
-    assert_eq!(ss[0], session(0, 9000, "a.exe", "other"));
+    // The session keeps the title it OPENED with, not the latest one (spec
+    // §4.3: "app_sessions.window_title is the title when the session opened").
+    assert_eq!(sessions(out.clone()), vec![session(0, 9000, "a.exe", "")]);
+    // The later Foreground was still a title change: logged at 3000.
+    assert_eq!(titles(out), vec![title(3000, "a.exe", "other")]);
     assert_eq!(tr.open_session(), None);
 }
 
@@ -251,12 +253,13 @@ fn titles_disabled_logs_nothing() {
     out.extend(tr.on_signal(ts(6000, "a.exe", "T3")));
     out.extend(tr.on_signal(fg(7000, "b.exe", "T4")));
     out.extend(tr.finalize(9000));
-    // Sessions are still produced...
+    // Sessions are still produced, and they store EMPTY titles (spec §4.3:
+    // "capture_window_titles = false stores empty titles and no title log")...
     assert_eq!(
         sessions(out.clone()),
         vec![
-            session(0, 7000, "a.exe", "T3"),
-            session(7000, 9000, "b.exe", "T4")
+            session(0, 7000, "a.exe", ""),
+            session(7000, 9000, "b.exe", "")
         ]
     );
     // ...but no Title outputs at all.
@@ -270,4 +273,143 @@ fn finalize_closes_open_session_at_given_ts() {
     out.extend(tr.finalize(70));
     assert_eq!(sessions(out), vec![session(10, 70, "a.exe", "")]);
     assert_eq!(tr.open_session(), None);
+}
+
+// Finding 3: dedupe key is (process_name, title), not a global title.
+
+#[test]
+fn same_title_in_a_different_process_is_logged() {
+    let mut tr = SessionTracker::new(true);
+    let mut out = tr.on_signal(fg(0, "a.exe", "Doc"));
+    // App B shows the identical title; B's title IS logged.
+    out.extend(tr.on_signal(fg(3000, "b.exe", "Doc")));
+    out.extend(tr.finalize(7000));
+    assert_eq!(
+        titles(out.clone()),
+        vec![title(0, "a.exe", "Doc"), title(3000, "b.exe", "Doc")]
+    );
+    assert_eq!(
+        sessions(out),
+        vec![
+            session(0, 3000, "a.exe", "Doc"),
+            session(3000, 7000, "b.exe", "Doc")
+        ]
+    );
+}
+
+#[test]
+fn identical_title_after_lock_cycle_not_relogged() {
+    let mut tr = SessionTracker::new(true);
+    let mut out = tr.on_signal(fg(0, "a.exe", "Doc"));
+    // Closing at 3000 flushes the pending title (dwell 3 s).
+    out.extend(tr.on_signal(locked(3000)));
+    out.extend(tr.on_signal(unlocked(4000)));
+    out.extend(tr.finalize(6000));
+    // The reopened session shows the same title for the same process:
+    // logged once, even across the lock cycle.
+    assert_eq!(titles(out.clone()), vec![title(0, "a.exe", "Doc")]);
+    assert_eq!(
+        sessions(out),
+        vec![
+            session(0, 3000, "a.exe", "Doc"),
+            session(4000, 6000, "a.exe", "Doc")
+        ]
+    );
+}
+
+// Finding 4: a same-process Foreground while active reopens a session after
+// finalize left the tracker session-less.
+
+#[test]
+fn session_reopens_after_finalize_on_foreground() {
+    let mut tr = SessionTracker::new(true);
+    let mut out = tr.on_signal(fg(0, "a.exe", "T"));
+    out.extend(tr.finalize(1000));
+    assert_eq!(sessions(out.clone()), vec![session(0, 1000, "a.exe", "T")]);
+    // Still active, still a.exe in the foreground: Foreground reopens.
+    out.clear();
+    out.extend(tr.on_signal(fg(3000, "a.exe", "T")));
+    assert_eq!(
+        sessions(std::mem::take(&mut out)),
+        vec![],
+        "no session closes on reopen"
+    );
+    assert_eq!(tr.open_session(), open(3000, "a.exe", "T"));
+    out.extend(tr.finalize(5000));
+    assert_eq!(sessions(out), vec![session(3000, 5000, "a.exe", "T")]);
+}
+
+// Finding 6: edge tests.
+
+#[test]
+fn title_dwell_exactly_min_ms_is_logged() {
+    let mut tr = SessionTracker::new(true);
+    let mut out = tr.on_signal(fg(0, "a.exe", "T1"));
+    out.extend(tr.on_signal(ts(1000, "a.exe", "T2")));
+    out.extend(tr.finalize(3000));
+    // T2's dwell is exactly TITLE_MIN_MS (3000 - 1000 = 2000) → counted.
+    assert_eq!(titles(out.clone()), vec![title(1000, "a.exe", "T2")]);
+    assert_eq!(sessions(out), vec![session(0, 3000, "a.exe", "T1")]);
+}
+
+#[test]
+fn foreground_to_lock_app_closes_session_and_opens_nothing() {
+    let mut tr = SessionTracker::new(true);
+    let mut out = tr.on_signal(fg(0, "a.exe", "T1"));
+    out.extend(tr.on_signal(ts(1000, "a.exe", "T2")));
+    out.extend(tr.on_signal(fg(3000, LOCK_APP, "lock screen")));
+    assert_eq!(tr.open_session(), None, "LockApp opens nothing");
+    // The open session closed at 3000 (with its opening title), and the
+    // pending T2 (dwell exactly 2 s) was flushed.
+    assert_eq!(sessions(out.clone()), vec![session(0, 3000, "a.exe", "T1")]);
+    assert_eq!(titles(out), vec![title(1000, "a.exe", "T2")]);
+}
+
+#[test]
+fn title_for_other_process_is_ignored() {
+    let mut tr = SessionTracker::new(true);
+    let mut out = tr.on_signal(fg(0, "a.exe", "T1"));
+    out.extend(tr.on_signal(fg(500, "b.exe", "T2")));
+    // A title that names a different process than the tracked foreground is
+    // unexpected input: ignored, no corrupt rows.
+    out.extend(tr.on_signal(ts(1000, "a.exe", "T3")));
+    out.extend(tr.finalize(6000));
+    assert_eq!(titles(out.clone()), vec![title(500, "b.exe", "T2")]);
+    assert_eq!(
+        sessions(out),
+        vec![
+            session(0, 500, "a.exe", "T1"),
+            session(500, 6000, "b.exe", "T2")
+        ],
+        "stray title must not corrupt the open session"
+    );
+}
+
+#[test]
+fn double_finalize_does_not_duplicate_session() {
+    let mut tr = SessionTracker::new(true);
+    let mut out = tr.on_signal(fg(0, "a.exe", "T"));
+    out.extend(tr.finalize(1000));
+    out.extend(tr.finalize(2000));
+    assert_eq!(sessions(out), vec![session(0, 1000, "a.exe", "T")]);
+    assert_eq!(tr.open_session(), None);
+}
+
+#[test]
+fn locked_then_unlocked_uses_current_foreground_rules() {
+    let mut tr = SessionTracker::new(true);
+    let mut out = tr.on_signal(locked(0));
+    // Locked arrives before any foreground: tracked, but opens nothing.
+    out.extend(tr.on_signal(fg(100, "a.exe", "Doc")));
+    assert_eq!(tr.open_session(), None);
+    out.extend(tr.on_signal(unlocked(200)));
+    // Becoming active opens a session for the (now) current foreground.
+    assert_eq!(tr.open_session(), open(200, "a.exe", "Doc"));
+    // Dwell since 200; finalize exactly TITLE_MIN_MS later logs the title.
+    out.extend(tr.finalize(2200));
+    assert_eq!(
+        sessions(out.clone()),
+        vec![session(200, 2200, "a.exe", "Doc")]
+    );
+    assert_eq!(titles(out), vec![title(200, "a.exe", "Doc")]);
 }

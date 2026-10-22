@@ -84,9 +84,10 @@ pub struct SessionTracker {
     current: Option<(String, String)>,
     open: Option<OpenSession>,
     pending: Option<PendingTitle>,
-    /// Last title string that was emitted; consecutive identical titles are
-    /// logged once, so this is kept globally across sessions.
-    last_emitted: Option<String>,
+    /// Last `(process, title)` pair that was emitted; consecutive identical
+    /// titles are logged once per process, so this is kept globally across
+    /// sessions (a different app showing the same title is still logged).
+    last_emitted: Option<(String, String)>,
     locked: bool,
     suspended: bool,
     display_off: bool,
@@ -147,6 +148,7 @@ impl SessionTracker {
 
     fn on_foreground(&mut self, ts: u64, process: String, title: String) -> Vec<TrackerOutput> {
         let mut out = Vec::new();
+        let title = self.apply_capture_flag(title);
         let same_process = self.current.as_ref().is_some_and(|(p, _)| *p == process);
         self.current = Some((process.clone(), title.clone()));
 
@@ -161,15 +163,19 @@ impl SessionTracker {
 
         if same_process {
             // Same process: not a session boundary, just a title change.
-            if let Some(open) = self.open.as_mut() {
-                open.window_title = title.clone();
-            }
+            // The open session keeps its opening title (spec §4.3); the
+            // change is only offered to the title log.
             if let Some(t) = self.emit_pending_if_due(ts) {
                 out.push(t);
             }
-            self.offer_title(ts, process, title);
+            self.offer_title(ts, process.clone(), title.clone());
         } else {
             out.extend(self.close_open(ts));
+        }
+        if self.open.is_none() {
+            // Either a different process (its session opens at ts), or the
+            // current foreground still lacks a session because one was
+            // already finalized (e.g. shutdown tracking): reopen it.
             self.open = Some(OpenSession {
                 ts_start_ms: ts,
                 process_name: process.clone(),
@@ -187,6 +193,7 @@ impl SessionTracker {
             // unexpected input; ignore it rather than corrupt state.
             return Vec::new();
         }
+        let title = self.apply_capture_flag(title);
         if let Some((_, t)) = self.current.as_mut() {
             *t = title.clone();
         }
@@ -196,9 +203,8 @@ impl SessionTracker {
         if self.open.is_none() {
             return Vec::new();
         }
-        if let Some(open) = self.open.as_mut() {
-            open.window_title = title.clone();
-        }
+        // The open session keeps the title it opened with (spec §4.3); this
+        // event only feeds the title log.
         let mut out = Vec::new();
         if let Some(t) = self.emit_pending_if_due(ts) {
             out.push(t);
@@ -207,20 +213,35 @@ impl SessionTracker {
         out
     }
 
+    /// Titles are captured only when `capture_titles` is set; otherwise the
+    /// tracker stores empty titles and logs none (spec §4.3).
+    fn apply_capture_flag(&self, title: String) -> String {
+        if self.capture_titles {
+            title
+        } else {
+            String::new()
+        }
+    }
+
     /// Emits the pending title if it was shown at least `TITLE_MIN_MS` and
-    /// differs from the last emitted title. When due, the pending entry is
-    /// consumed (`last_emitted` updated); when not due it stays anchored so a
-    /// later event can still flush it from its original timestamp.
+    /// differs from the last emitted `(process, title)` pair. When due, the
+    /// pending entry is consumed (`last_emitted` updated); when not due it
+    /// stays anchored so a later event can still flush it from its original
+    /// timestamp.
     fn emit_pending_if_due(&mut self, at_ts: u64) -> Option<TrackerOutput> {
         let p = self.pending.as_ref()?;
-        if at_ts - p.ts_ms < TITLE_MIN_MS {
+        if at_ts.saturating_sub(p.ts_ms) < TITLE_MIN_MS {
             return None;
         }
-        if self.last_emitted.as_deref() == Some(p.title.as_str()) {
+        if self
+            .last_emitted
+            .as_ref()
+            .is_some_and(|(proc, title)| *proc == p.process_name && *title == p.title)
+        {
             self.pending = None;
             return None;
         }
-        self.last_emitted = Some(p.title.clone());
+        self.last_emitted = Some((p.process_name.clone(), p.title.clone()));
         let out = TrackerOutput::Title(WindowTitle {
             ts_ms: p.ts_ms,
             process_name: p.process_name.clone(),
@@ -256,7 +277,8 @@ impl SessionTracker {
         self.pending = None; // the pending entry belongs to this session only
         let mut out = vec![TrackerOutput::Session(AppSession {
             ts_start_ms: open.ts_start_ms,
-            ts_end_ms: ts,
+            // An out-of-order end timestamp must not precede the start one.
+            ts_end_ms: ts.max(open.ts_start_ms),
             process_name: open.process_name,
             window_title: open.window_title,
         })];
