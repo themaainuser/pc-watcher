@@ -2,6 +2,11 @@
 resolver = "3"
 members = ["crates/*"]
 
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
 [workspace.dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
@@ -10,19 +15,14 @@ thiserror = "2.0.21"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 csv = "1.4.0"
 dns-lookup = "4.0.2"
-etw = "0.0.1"
-windows = { version = "0.62.2", features = [
-    "Win32_Foundation",
-    "Win32_System_Threading",
-    "Win32_System_ProcessStatus",
-    "Win32_UI_Accessibility",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_System_Power",
-    "Win32_System_RemoteDesktop",
-] }
+ferrisetw = "1.2.0"
+windows = "0.62.2"            # members list their own features (below)
 tiny_http = "0.12.0"
 tray-icon = "0.26.1"
 tao = "0.37.1"
+time = { version = "0.3.55", features = ["local-offset", "formatting", "macros"] }
+log = "0.4.34"
+tempfile = "3.27.0"           # dev-dependency only
 
 [profile.release]
 lto = "thin"

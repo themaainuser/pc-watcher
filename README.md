@@ -46,3 +46,16 @@ linker = "rust-lld"
 
 No external `lld-link` install is required; `rust-lld` acts as the MSVC
 `link.exe` compatible driver here.
+
+## OneDrive rule
+
+The project deliberately lives **outside** any OneDrive / cloud-sync folder
+(it currently sits at `D:\PC-Watcher`). Reasons:
+
+- `target/` grows to multi-GB during normal development, and sync clients
+  would try to upload every intermediate artifact.
+- Sync clients frequently hold file locks on freshly produced binaries,
+  which breaks the linker (`error: link failed` / "Access is denied").
+
+If you ever clone or move the project, keep it in a plain local path and
+point `CARGO_TARGET_DIR` at a local (non-synced) directory if in doubt.
