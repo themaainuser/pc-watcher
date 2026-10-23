@@ -50,7 +50,7 @@ pub fn tcp_snapshot_events(cache: &SharedProcessCache, ts_ms: u64) -> Vec<Connec
     let mut events = Vec::new();
     for row in rows {
         let (process_name, process_path) = {
-            let mut cache = cache.lock().expect("process cache poisoned");
+            let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
             cache.get(row.pid)
         };
         events.push(ConnectionEvent {
@@ -203,4 +203,241 @@ fn parse_v6(buf: &[u8]) -> Vec<Row> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pcw_types::Direction;
+    use windows::Win32::NetworkManagement::IpHelper::MIB_TCP_STATE_CLOSED;
+
+    /// DWORD field with the port in network order in its low 16 bits (the
+    /// `GetExtendedTcpTable` convention), little-endian in memory.
+    fn port_dword(port: u16) -> [u8; 4] {
+        (port.to_be() as u32).to_le_bytes()
+    }
+
+    /// One MIB_TCPROW_OWNER_PID as raw bytes (dwState, dwLocalAddr,
+    /// dwLocalPort, dwRemoteAddr, dwRemotePort, dwOwningPid — 24 bytes, no
+    /// padding).
+    fn v4_row(
+        state: u32,
+        local_port: u16,
+        remote_ip: Ipv4Addr,
+        remote_port: u16,
+        pid: u32,
+    ) -> Vec<u8> {
+        let mut row = Vec::with_capacity(24);
+        row.extend_from_slice(&state.to_le_bytes());
+        row.extend_from_slice(&127u32.to_be_bytes()); // localAddr, ignored by the parser
+        row.extend_from_slice(&port_dword(local_port));
+        row.extend_from_slice(&remote_ip.octets());
+        row.extend_from_slice(&port_dword(remote_port));
+        row.extend_from_slice(&pid.to_le_bytes());
+        row
+    }
+
+    /// One MIB_TCP6ROW_OWNER_PID as raw bytes (ucLocalAddr, dwLocalScopeId,
+    /// dwLocalPort, ucRemoteAddr, dwRemoteScopeId, dwRemotePort, dwState,
+    /// dwOwningPid — 56 bytes, no padding).
+    fn v6_row(
+        state: u32,
+        local_addr: Ipv6Addr,
+        local_port: u16,
+        remote_addr: Ipv6Addr,
+        remote_port: u16,
+        pid: u32,
+    ) -> Vec<u8> {
+        let mut row = Vec::with_capacity(56);
+        row.extend_from_slice(&local_addr.octets());
+        row.extend_from_slice(&0u32.to_le_bytes()); // scope id, ignored
+        row.extend_from_slice(&port_dword(local_port));
+        row.extend_from_slice(&remote_addr.octets());
+        row.extend_from_slice(&0u32.to_le_bytes()); // scope id, ignored
+        row.extend_from_slice(&port_dword(remote_port));
+        row.extend_from_slice(&state.to_le_bytes());
+        row.extend_from_slice(&pid.to_le_bytes());
+        row
+    }
+
+    /// `u32` entry count followed by the rows (the shape
+    /// `GetExtendedTcpTable` hands over).
+    fn table(count: u32, rows: Vec<Vec<u8>>) -> Vec<u8> {
+        let mut buf = count.to_le_bytes().to_vec();
+        for row in rows {
+            buf.extend_from_slice(&row);
+        }
+        buf
+    }
+
+    #[test]
+    fn parse_v4_honors_row_count_and_byte_swaps_ports() {
+        let buf = table(
+            3,
+            vec![
+                v4_row(
+                    MIB_TCP_STATE_ESTAB.0 as u32,
+                    49152,
+                    Ipv4Addr::new(1, 2, 3, 4),
+                    443,
+                    4321,
+                ),
+                v4_row(
+                    MIB_TCP_STATE_LISTEN.0 as u32,
+                    8080,
+                    Ipv4Addr::UNSPECIFIED,
+                    0,
+                    5,
+                ),
+                v4_row(
+                    MIB_TCP_STATE_CLOSED.0 as u32,
+                    0,
+                    Ipv4Addr::UNSPECIFIED,
+                    0,
+                    9,
+                ),
+            ],
+        );
+        let rows = parse_v4(&buf);
+        // Count honored; rows in neither state are dropped.
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].remote_port, 443); // stored 0xBB01 network order
+        assert_eq!(rows[0].local_port, 49152);
+        assert_eq!(rows[0].remote_ip, "1.2.3.4");
+        assert_eq!(rows[0].pid, 4321);
+        assert!(!rows[0].listening);
+    }
+
+    #[test]
+    fn parse_v4_listening_rows_feed_the_direction_decision() {
+        let buf = table(
+            2,
+            vec![
+                v4_row(
+                    MIB_TCP_STATE_LISTEN.0 as u32,
+                    8080,
+                    Ipv4Addr::UNSPECIFIED,
+                    0,
+                    5,
+                ),
+                v4_row(
+                    MIB_TCP_STATE_ESTAB.0 as u32,
+                    49152,
+                    Ipv4Addr::new(1, 2, 3, 4),
+                    443,
+                    4321,
+                ),
+            ],
+        );
+        let rows = parse_v4(&buf);
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].listening);
+        assert!(rows[1].remote_port == 443 && !rows[1].listening);
+
+        // The direction mapping `tcp_snapshot_events` applies: a local port
+        // that belongs to a listening socket is an accepted ("in")
+        // connection, anything else dialed out.
+        let listening: HashSet<u16> = rows
+            .iter()
+            .filter(|r| r.listening)
+            .map(|r| r.local_port)
+            .collect();
+        assert_eq!(snapshot_direction(8080, &listening), Direction::In);
+        assert_eq!(snapshot_direction(49152, &listening), Direction::Out);
+    }
+
+    #[test]
+    fn parse_v4_rejects_buffer_claiming_more_rows_than_it_holds() {
+        // The (count - 1) underflow guard: 5 claimed rows need
+        // (5 - 1) * 24 + 28 = 124 bytes, the buffer only backs one.
+        let buf = table(
+            5,
+            vec![v4_row(
+                MIB_TCP_STATE_ESTAB.0 as u32,
+                4444,
+                Ipv4Addr::new(1, 2, 3, 4),
+                443,
+                7,
+            )],
+        );
+        assert_eq!(buf.len(), 28); // count + one row = size_of::<MIB_TCPTABLE_OWNER_PID>()
+        assert!(parse_v4(&buf).is_empty());
+    }
+
+    #[test]
+    fn parse_v4_rejects_truncated_buffer() {
+        // Shorter than one MIB_TCPTABLE_OWNER_PID (28 bytes).
+        let buf = vec![0u8; 27];
+        assert!(parse_v4(&buf).is_empty());
+    }
+
+    #[test]
+    fn parse_v6_honors_row_count_and_byte_swaps_ports() {
+        let buf = table(
+            3,
+            vec![
+                v6_row(
+                    MIB_TCP_STATE_ESTAB.0 as u32,
+                    Ipv6Addr::LOCALHOST,
+                    1000,
+                    Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
+                    443,
+                    42,
+                ),
+                v6_row(
+                    MIB_TCP_STATE_LISTEN.0 as u32,
+                    Ipv6Addr::UNSPECIFIED,
+                    8080,
+                    Ipv6Addr::UNSPECIFIED,
+                    0,
+                    42,
+                ),
+                v6_row(
+                    MIB_TCP_STATE_CLOSED.0 as u32,
+                    Ipv6Addr::UNSPECIFIED,
+                    0,
+                    Ipv6Addr::UNSPECIFIED,
+                    0,
+                    1,
+                ),
+            ],
+        );
+        let rows = parse_v6(&buf);
+        // Count honored; rows in neither state are dropped.
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].local_port, 1000);
+        assert_eq!(rows[0].remote_port, 443); // stored 0xBB01 network order
+        assert_eq!(rows[0].remote_ip, "2001:db8::1");
+        assert_eq!(rows[0].pid, 42);
+        assert!(!rows[0].listening);
+        assert!(rows[1].listening);
+        assert_eq!(rows[1].local_port, 8080);
+        assert_eq!(rows[1].remote_ip, String::new());
+    }
+
+    #[test]
+    fn parse_v6_rejects_buffer_claiming_more_rows_than_it_holds() {
+        // 4 claimed rows need (4 - 1) * 56 + 60 = 228 bytes; the buffer
+        // holds the header plus one row.
+        let buf = table(
+            4,
+            vec![v6_row(
+                MIB_TCP_STATE_ESTAB.0 as u32,
+                Ipv6Addr::LOCALHOST,
+                1000,
+                Ipv6Addr::UNSPECIFIED,
+                443,
+                7,
+            )],
+        );
+        assert_eq!(buf.len(), 60); // count + one row = size_of::<MIB_TCP6TABLE_OWNER_PID>()
+        assert!(parse_v6(&buf).is_empty());
+    }
+
+    #[test]
+    fn parse_v6_rejects_truncated_buffer() {
+        // Shorter than one MIB_TCP6TABLE_OWNER_PID (60 bytes).
+        let buf = vec![0u8; 59];
+        assert!(parse_v6(&buf).is_empty());
+    }
 }

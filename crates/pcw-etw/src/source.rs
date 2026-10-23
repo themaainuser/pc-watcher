@@ -177,7 +177,10 @@ fn network_provider(
 
             if protocol == pcw_types::Protocol::Udp {
                 let now_ms = filetime_to_unix_ms(record.raw_timestamp());
-                let allowed = limiter.lock().expect("profile limiter poisoned").allow(
+                // Poison-tolerant: ferrisetw wraps callbacks in
+                // catch_unwind; a poisoned mutex here would otherwise take
+                // down the whole session (and the agent) on the next event.
+                let allowed = limiter.lock().unwrap_or_else(|e| e.into_inner()).allow(
                     pid,
                     remote_ip,
                     remote_port,
@@ -190,7 +193,7 @@ fn network_provider(
             }
 
             let (process_name, process_path) = {
-                let mut cache = cache.lock().expect("process cache poisoned");
+                let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
                 cache.get(pid)
             };
             let event = ConnectionEvent {
@@ -274,7 +277,7 @@ fn process_provider(cache: SharedProcessCache) -> Provider {
                 return;
             };
             let started = event_id == 1;
-            let mut cache = cache.lock().expect("process cache poisoned");
+            let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
             cache.note_process(pid, &image, started);
         })
         .build()
@@ -289,19 +292,32 @@ pub fn query_loss(session: &str) -> Option<(u64, u64)> {
     const NAME_SPACE_BYTES: usize = 1024;
 
     let properties_size = std::mem::size_of::<EVENT_TRACE_PROPERTIES>();
-    let mut buf = vec![0u8; properties_size + NAME_SPACE_BYTES];
+    let total = properties_size + NAME_SPACE_BYTES;
+    // `EVENT_TRACE_PROPERTIES` needs pointer alignment; a plain `u8` vec only
+    // guarantees align 1, so the region is backed by `u64` cells (both sizes
+    // are multiples of 8, keeping the byte layout identical).
+    debug_assert_eq!(properties_size % 8, 0);
+    let mut buf = vec![0u64; total / 8 + usize::from(total % 8 != 0)];
     let props = buf.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES;
 
     unsafe {
-        (*props).Wnode.BufferSize = buf.len() as u32;
+        (*props).Wnode.BufferSize = total as u32;
         (*props).LoggerNameOffset = properties_size as u32;
 
         let name: Vec<u16> = session.encode_utf16().chain(std::iter::once(0)).collect();
         if name.len() * 2 > NAME_SPACE_BYTES {
             return None;
         }
-        let name_bytes = std::slice::from_raw_parts(name.as_ptr().cast::<u8>(), name.len() * 2);
-        buf[properties_size..properties_size + name_bytes.len()].copy_from_slice(name_bytes);
+        // Null-terminated UTF-16 name written right behind the properties
+        // struct, through the same pointer API as `ControlTraceW` — never
+        // through an aliased `u8` slice view.
+        debug_assert_eq!(properties_size % 2, 0);
+        let name_slot = buf
+            .as_mut_ptr()
+            .cast::<u8>()
+            .add(properties_size)
+            .cast::<u16>();
+        std::ptr::copy_nonoverlapping(name.as_ptr(), name_slot, name.len());
 
         let status = ControlTraceW(
             CONTROLTRACE_HANDLE::default(),
