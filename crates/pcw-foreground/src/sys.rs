@@ -18,8 +18,10 @@ use windows::core::{PCWSTR, w};
 
 /// Attaches this process to the parent process's console so a console
 /// launched from a terminal can receive diagnostics output. Returns `true`
-/// when a console was attached (a tray app without a console keeps going
-/// silently).
+/// only when THIS call newly attached a console: `false` also means "already
+/// attached" (`AttachConsole` fails with `ERROR_ACCESS_DENIED` for a process
+/// that already has a console) as well as the no-parent-console case, and a
+/// tray app without a console keeps going silently either way.
 pub fn attach_parent_console() -> bool {
     unsafe { AttachConsole(ATTACH_PARENT_PROCESS).is_ok() }
 }
@@ -31,15 +33,12 @@ pub fn is_elevated() -> bool {
         if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
             return false;
         }
-        let elevation = TOKEN_ELEVATION::default();
+        let mut elevation = TOKEN_ELEVATION::default();
         let mut return_length = 0u32;
         let ok = GetTokenInformation(
             token,
             TokenElevation,
-            Some(
-                &elevation as *const TOKEN_ELEVATION as *const core::ffi::c_void
-                    as *mut core::ffi::c_void,
-            ),
+            Some(&mut elevation as *mut TOKEN_ELEVATION as *mut core::ffi::c_void),
             std::mem::size_of::<TOKEN_ELEVATION>() as u32,
             &mut return_length,
         )
