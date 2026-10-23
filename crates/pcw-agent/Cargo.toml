@@ -9,6 +9,12 @@ rusqlite = { workspace = true }
 pcw-storage = { path = "../pcw-storage" }
 pcw-types = { path = "../pcw-types" }
 pcw-foreground = { path = "../pcw-foreground" }
+pcw-config = { path = "../pcw-config" }
+pcw-export = { path = "../pcw-export" }
+pcw-resolve = { path = "../pcw-resolve" }
+pcw-etw = { path = "../pcw-etw" }
+tray-icon = { workspace = true }
+tao = { workspace = true }
 log = { workspace = true, features = ["alloc"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

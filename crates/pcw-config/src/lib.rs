@@ -1,5 +1,4 @@
 //! PC-Watcher configuration: loads or creates `%LOCALAPPDATA%\PC-Watcher\config.toml`.
-
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -73,14 +72,18 @@ impl Default for Config {
 ///
 /// `pcw_data_dir` (`PCW_DATA_DIR`) wins when set; otherwise
 /// `<local_app_data>\PC-Watcher`; otherwise [`ConfigError::NoDataDir`].
+/// An env value SET TO THE EMPTY STRING counts as absent (review flag F7):
+/// a bare `PCW_DATA_DIR=""` must not resolve to the current directory and an
+/// empty `LOCALAPPDATA` must not resolve to `\PC-Watcher` on the current drive.
 pub fn data_dir_from(
     pcw_data_dir: Option<OsString>,
     local_app_data: Option<OsString>,
 ) -> Result<PathBuf, ConfigError> {
-    if let Some(dir) = pcw_data_dir {
+    if let Some(dir) = pcw_data_dir.filter(|dir| !dir.is_empty()) {
         return Ok(PathBuf::from(dir));
     }
     local_app_data
+        .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
         .map(|base| base.join("PC-Watcher"))
         .ok_or(ConfigError::NoDataDir)

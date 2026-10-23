@@ -55,6 +55,20 @@ fn data_dir_env_override_wins() {
         data_dir_from(None, Some("C:\\L".into())).unwrap(),
         PathBuf::from("C:\\L\\PC-Watcher")
     );
+    // F7: an env value set to the empty string counts as absent, so the
+    // fallback (or NoDataDir) applies instead of the current directory.
+    assert_eq!(
+        data_dir_from(Some("".into()), Some("C:\\L".into())).unwrap(),
+        PathBuf::from("C:\\L\\PC-Watcher")
+    );
+    assert!(matches!(
+        data_dir_from(None, Some("".into())),
+        Err(ConfigError::NoDataDir)
+    ));
+    assert!(matches!(
+        data_dir_from(Some("".into()), None),
+        Err(ConfigError::NoDataDir)
+    ));
     assert!(matches!(
         data_dir_from(None, None),
         Err(ConfigError::NoDataDir)
