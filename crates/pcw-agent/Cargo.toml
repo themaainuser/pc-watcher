@@ -5,3 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+rusqlite = { workspace = true }
+pcw-storage = { path = "../pcw-storage" }
+pcw-types = { path = "../pcw-types" }
+pcw-foreground = { path = "../pcw-foreground" }
+log = { workspace = true, features = ["alloc"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+time = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
