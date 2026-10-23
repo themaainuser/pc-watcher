@@ -5,6 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+ferrisetw.workspace = true
+pcw-types = { path = "../pcw-types" }
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_System_Threading",
