@@ -30,3 +30,22 @@ fn utf16_file_has_bom() {
     assert_eq!(&b[..2], &[0xFF, 0xFE]);
     assert_eq!(b.len(), 2 + 4 * 2);
 }
+
+/// All four XML metacharacters (`& < > "`) at once, in both the `exe` path
+/// and the `user` (review finding: only `&` was pinned before).
+#[test]
+fn task_xml_escapes_ampersands_angle_brackets_and_quotes() {
+    let x = task_xml(Path::new(r#"C:\a&b<c>d"e\pcw-agent.exe"#), r"DOMAIN\A&B");
+    assert!(
+        x.contains(r#"<Command>C:\a&amp;b&lt;c&gt;d&quot;e\pcw-agent.exe</Command>"#),
+        "exe path not fully XML-escaped:\n{x}"
+    );
+    assert!(
+        x.contains(r"<UserId>DOMAIN\A&amp;B</UserId>"),
+        "user not fully XML-escaped:\n{x}"
+    );
+    // No raw metacharacter survives inside an attribute/text value.
+    for raw in [r#"C:\a&b<c>d"e\pcw-agent.exe"#, r"DOMAIN\A&B"] {
+        assert!(!x.contains(raw), "unescaped {raw} in XML:\n{x}");
+    }
+}

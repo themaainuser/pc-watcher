@@ -12,7 +12,7 @@ use tao::event_loop::{ControlFlow, EventLoop};
 use time::OffsetDateTime;
 use time::macros::format_description;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
-use tray_icon::{Icon, TrayIconBuilder};
+use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 /// User events delivered on the loop: menu clicks forwarded from tray-icon's
 /// handler, and tooltip refreshes sent by the timer thread.
@@ -52,9 +52,13 @@ pub struct MenuHandlers {
 /// Builds the tray icon with the five-item menu and runs the tao loop on the
 /// calling thread (must be the main thread). Never returns.
 ///
-/// # Panics
-/// When the menu or tray icon cannot be built — there is no meaningful
-/// agent without the tray.
+/// Menu and icon build failures are logged, NOT fatal: the agent keeps
+/// collecting. A menu item that could not be appended stays unreachable; a
+/// failed icon build loses the menu, tooltip and thereby the Exit action of
+/// the tray (the scheduled task can still be stopped via
+/// `schtasks /End /TN PC-Watcher`). The tao event loop itself (built by the
+/// caller BEFORE this function) is the one unrecoverable piece: without it,
+/// there is nothing to run and nothing to shut down cleanly.
 #[allow(clippy::needless_pass_by_value)] // consumes the loop (tao `run`)
 pub fn run_main_loop(
     event_loop: EventLoop<TraySignal>,
@@ -79,22 +83,34 @@ pub fn run_main_loop(
     let item_folder = MenuItem::with_id(ID_OPEN_DATA_FOLDER, "Open data folder", true, None);
     let item_exit = MenuItem::with_id(ID_EXIT, "Exit", true, None);
     let menu = Menu::new();
-    for item in [
-        &item_open,
-        &item_pause,
-        &item_export,
-        &item_folder,
-        &item_exit,
+    for (name, item) in [
+        ("Open Dashboard", &item_open),
+        ("Pause / Resume", &item_pause),
+        ("Export now", &item_export),
+        ("Open data folder", &item_folder),
+        ("Exit", &item_exit),
     ] {
-        menu.append(item).expect("append tray menu item");
+        // An item that cannot be appended stays unreachable; the rest of the
+        // menu (including Exit) keeps working — not worth panicking over.
+        if let Err(e) = menu.append(item) {
+            log::error!("tray menu item '{name}' could not be appended: {e}");
+        }
     }
 
-    let tray = TrayIconBuilder::new()
+    let tray: Option<TrayIcon> = match TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_tooltip(initial_tooltip)
         .with_icon(tray_icon_image())
         .build()
-        .expect("tray icon");
+    {
+        Ok(tray) => Some(tray),
+        Err(e) => {
+            // Degraded: collection continues, but there is no visible icon,
+            // no menu and thus no tray route to Exit anymore.
+            log::error!("tray icon unavailable (agent keeps collecting): {e}");
+            None
+        }
+    };
 
     let MenuHandlers {
         open_dashboard,
@@ -109,7 +125,9 @@ pub fn run_main_loop(
         *control_flow = ControlFlow::Wait;
         match event {
             Event::UserEvent(TraySignal::Tooltip(text)) => {
-                let _ = tray.set_tooltip(Some(text.as_str()));
+                if let Some(tray) = tray.as_ref() {
+                    let _ = tray.set_tooltip(Some(text.as_str()));
+                }
             }
             Event::UserEvent(TraySignal::Menu(click)) => match click.id().as_ref() {
                 ID_OPEN_DASHBOARD => open_dashboard(),

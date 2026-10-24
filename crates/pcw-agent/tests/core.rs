@@ -5,14 +5,16 @@
 //! All stores are seeded from temp-FILE databases (F8): `Store::open` asserts
 //! WAL mode, which `:memory:` cannot provide.
 
-use std::sync::mpsc::channel;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pcw_agent::state;
 use pcw_agent::timers::due;
+use pcw_agent::tracker::tracker_loop;
 use pcw_agent::writer::{WriterConfig, WriterMsg, run_writer};
-use pcw_foreground::OpenSession;
+use pcw_foreground::{OpenSession, SessionSignal};
 use pcw_storage::{SharedStore, Store, WriteOp};
 use pcw_types::{AppSession, ConnectionEvent, Counters, Direction, EventKind, Protocol};
 
@@ -300,4 +302,167 @@ fn due_logic() {
     assert!(due(10, None, 5));
     assert!(!due(10, Some(8), 5));
     assert!(due(13, Some(8), 5));
+}
+
+// ---- tracker stop path --------------------------------------------------
+
+/// Drains the writer channel into a plain Vec (the tracker has exited, so
+/// `try_recv` Empty = drained).
+fn drain_writer(rx: Receiver<WriterMsg>) -> Vec<WriterMsg> {
+    std::iter::from_fn(|| rx.try_recv().ok()).collect()
+}
+
+/// Watches a thread on a channel so `wait_until` can detect it RETURNING
+/// (a `JoinHandle` cannot be polled with a timeout directly). In the old
+/// sender-disconnect-only design this signal never came when a sender clone
+/// was held by a menu closure, and the assertion below fired.
+///
+/// Call rules: a tiny heartbeat lets test 1 OBSERVE when a signal has been
+/// consumed (its heartbeat `OpenSession` appears); a huge one (test 2)
+/// suppresses heartbeats so every `OpenSession` message in the output belongs
+/// to the stop sequence itself.
+fn spawn_tracker(
+    rx: Receiver<SessionSignal>,
+    tx_writer: mpsc::Sender<WriterMsg>,
+    heartbeat: Duration,
+    stop: Arc<AtomicBool>,
+) -> (mpsc::Receiver<()>, std::thread::JoinHandle<()>) {
+    let (done_tx, done_rx) = channel();
+    let handle = std::thread::spawn(move || {
+        tracker_loop(rx, tx_writer, false, heartbeat, stop);
+        let _ = done_tx.send(());
+    });
+    (done_rx, handle)
+}
+
+/// The deterministic stop signal (review finding 1): raising the flag makes
+/// the tracker finalize EXACTLY ONCE, post the final outputs +
+/// `OpenSession {None}` + `Shutdown` — and, crucially, RETURN, where the old
+/// sender-disconnect-only design hung forever because the tray's pause-menu
+/// closure kept a sender clone alive.
+#[test]
+fn tracker_stop_flag_finalizes_once_posts_none_and_shutdown_and_returns() {
+    let (tx_sig, rx_sig) = channel();
+    let (tx_w, rx_w) = channel::<WriterMsg>();
+    let stop = Arc::new(AtomicBool::new(false));
+    let (done, handle) = spawn_tracker(rx_sig, tx_w, Duration::from_millis(30), Arc::clone(&stop));
+
+    // One foreground signal: finalize must close exactly this one session.
+    tx_sig
+        .send(SessionSignal::Foreground {
+            ts_ms: 1000,
+            process_name: "app.exe".to_string(),
+            window_title: "Session Top".to_string(),
+        })
+        .unwrap();
+
+    // Emulate production: a sender clone captured by the tray pause-menu
+    // closure and held for the agent's lifetime — sender-disconnect can
+    // NEVER fire, so only the stop flag can end the loop.
+    let held_by_supposed_menu_closure = {
+        let tx = tx_sig.clone();
+        Some(Box::new(move || {
+            let _ = tx.send(SessionSignal::Paused { ts_ms: 99_999 });
+            true
+        }))
+    };
+    // Never dropped, like main's menu handler: `forget` keeps the leak
+    // contained to this test (the sender clone stays functional, not UB).
+    std::mem::forget(held_by_supposed_menu_closure);
+
+    // Everything the channel has produced, kept for the final accounting
+    // (`Receiver` is not `Clone`, so the wait below must be non-destructive).
+    let seen: Arc<Mutex<Vec<WriterMsg>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // The tracker's heartbeat `OpenSession` proves the signal was consumed
+    // BEFORE the stop flag is raised (message order is preserved).
+    assert!(
+        wait_until(Duration::from_secs(2), || {
+            let mut cache = seen.lock().unwrap();
+            while let Ok(m) = rx_w.try_recv() {
+                cache.push(m);
+            }
+            cache.iter().any(|m| {
+                matches!(
+                    m,
+                    WriterMsg::OpenSession { session: Some(s), .. }
+                        if s.process_name == "app.exe"
+                )
+            })
+        }),
+        "no heartbeat OpenSession for app.exe: the signal was not consumed"
+    );
+
+    stop.store(true, Ordering::Relaxed);
+    drop(tx_sig); // both triggers at once: finalize must still run once
+    // Old design: the tracker looped on Timeout forever and this timed out.
+    assert!(
+        wait_until(Duration::from_secs(5), || done.try_recv().is_ok()),
+        "tracker did not RETURN after the stop signal (old disconnect-only design hangs)"
+    );
+    handle.join().unwrap();
+    while let Ok(m) = rx_w.try_recv() {
+        seen.lock().unwrap().push(m);
+    }
+    // `WriterMsg` is not `Clone`: take the accumulated messages by value.
+    let messages = std::mem::take(&mut *seen.lock().unwrap());
+    let mut sessions = 0;
+    let mut titles = 0;
+    let mut opens_none = 0;
+    let mut opens_some = 0;
+    let mut shutdowns = 0;
+    for msg in messages {
+        match msg {
+            WriterMsg::Op(WriteOp::Session(_)) => sessions += 1,
+            WriterMsg::Op(WriteOp::Title(_)) => titles += 1,
+            WriterMsg::Op(_) => {}
+            WriterMsg::OpenSession { session: None, .. } => opens_none += 1,
+            WriterMsg::OpenSession {
+                session: Some(_), ..
+            } => opens_some += 1,
+            WriterMsg::Shutdown => shutdowns += 1,
+        }
+    }
+    // Finalize exactly once ⇒ exactly one closed session.
+    assert_eq!(sessions, 1, "finalize must emit exactly one session");
+    assert_eq!(titles, 0, "no title was shown long enough to be logged");
+    assert_eq!(opens_none, 1, "exactly one final OpenSession {{None}}");
+    assert!(
+        opens_some >= 1,
+        "the observed heartbeat OpenSession vanished"
+    );
+    assert_eq!(shutdowns, 1, "exactly one WriterMsg::Shutdown");
+}
+
+/// The preserved secondary trigger: with NO stop flag, all signal senders
+/// dropped still lets the tracker finalize (once) and RETURN (tracker
+/// panic-safety, e.g. when main itself is gone).
+#[test]
+fn tracker_sender_disconnect_still_finalizes_and_returns() {
+    let (tx_sig, rx_sig) = channel();
+    let (tx_w, rx_w) = channel::<WriterMsg>();
+    let stop = Arc::new(AtomicBool::new(false));
+    let (done, handle) = spawn_tracker(rx_sig, tx_w, Duration::from_secs(3_600), stop);
+
+    drop(tx_sig);
+    assert!(
+        wait_until(Duration::from_secs(5), || done.try_recv().is_ok()),
+        "tracker did not return after all senders were dropped"
+    );
+    handle.join().unwrap();
+
+    let messages = drain_writer(rx_w);
+    let mut opens_none = 0;
+    let mut shutdowns = 0;
+    let mut other = 0;
+    for msg in messages {
+        match msg {
+            WriterMsg::OpenSession { session: None, .. } => opens_none += 1,
+            WriterMsg::Shutdown => shutdowns += 1,
+            _ => other += 1,
+        }
+    }
+    assert_eq!(opens_none, 1);
+    assert_eq!(shutdowns, 1);
+    assert_eq!(other, 0, "no tracker outputs without any session to close");
 }

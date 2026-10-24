@@ -18,10 +18,7 @@ use pcw_agent::writer::{WriterConfig, WriterMsg, run_writer};
 use pcw_etw::source::{SourceConfig, query_loss, run_session, stop_session};
 use pcw_etw::supervisor::Supervisor;
 use pcw_etw::{NetEvent, SESSION_NAME};
-use pcw_foreground::{
-    HookHandle, SessionSignal, SessionTracker, TrackerOutput, attach_parent_console,
-    free_disk_bytes,
-};
+use pcw_foreground::{HookHandle, SessionSignal, attach_parent_console, free_disk_bytes};
 use pcw_storage::{SharedStore, Store, WriteOp};
 use pcw_types::{Counters, ProcessCache, SharedProcessCache};
 use tao::event_loop::{EventLoop, EventLoopBuilder, EventLoopProxy};
@@ -165,6 +162,9 @@ fn run_agent() {
     let exit_flag = Arc::new(AtomicBool::new(false));
     let supervisor = Arc::new(Mutex::new(Supervisor::new()));
     let export_running = Arc::new(AtomicBool::new(false));
+    // Tracker stop: raised by `shutdown` right after `hooks.stop()`; the
+    // tracker's loop polls it in 200 ms slices (pcw_agent::tracker).
+    let tracker_stop = Arc::new(AtomicBool::new(false));
     let db_path = data_dir.join("data.db");
     let min_free_bytes = u64::from(cfg.min_free_disk_gb).saturating_mul(BYTES_PER_GB);
 
@@ -195,9 +195,18 @@ fn run_agent() {
     let (tx_signals, rx_signals) = std::sync::mpsc::channel::<SessionSignal>();
     let tracker_thread = {
         let tx_writer = tx_writer.clone();
+        let tracker_stop = Arc::clone(&tracker_stop);
         thread::Builder::new()
             .name("pcw-tracker".into())
-            .spawn(move || tracker_loop(rx_signals, tx_writer, cfg.capture_window_titles))
+            .spawn(move || {
+                pcw_agent::tracker::tracker_loop(
+                    rx_signals,
+                    tx_writer,
+                    cfg.capture_window_titles,
+                    HEARTBEAT,
+                    tracker_stop,
+                )
+            })
             .expect("spawn tracker thread")
     };
 
@@ -359,8 +368,10 @@ fn run_agent() {
             move || {
                 let threads = AgentThreads {
                     exit_flag,
+                    tracker_stop,
                     hooks,
                     tx_signals,
+                    tx_writer,
                     ptr_stop,
                     timer: timer_thread,
                     ptr: ptr_thread,
@@ -436,61 +447,6 @@ fn sleep_in_slices(total: Duration, exit_flag: &AtomicBool) {
         let slice = remaining.min(TICK_SLICE);
         std::thread::sleep(slice);
         remaining = remaining.saturating_sub(slice);
-    }
-}
-
-/// Owns the tracker; receives Win32 session signals and the heartbeat.
-fn tracker_loop(
-    rx: std::sync::mpsc::Receiver<SessionSignal>,
-    tx_writer: std::sync::mpsc::Sender<WriterMsg>,
-    capture_titles: bool,
-) {
-    let mut tracker = SessionTracker::new(capture_titles);
-    let mut last_heartbeat = Instant::now();
-    loop {
-        match rx.recv_timeout(HEARTBEAT) {
-            Ok(signal) => {
-                for out in tracker.on_signal(signal) {
-                    if let Err(e) = tx_writer.send(tracker_op(out)) {
-                        log::error!("writer channel closed: {e}");
-                        return;
-                    }
-                }
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            // All signal sources gone (hook thread stopped, main dropped its
-            // sender): finalize ONCE (review flag F12), then the final
-            // heartbeat below clears meta.open_session.
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                for out in tracker.finalize(now_ms()) {
-                    let _ = tx_writer.send(tracker_op(out));
-                }
-                break;
-            }
-        }
-        if last_heartbeat.elapsed() >= HEARTBEAT {
-            last_heartbeat = Instant::now();
-            let _ = tx_writer.send(WriterMsg::OpenSession {
-                session: tracker.open_session(),
-                now_ms: now_ms(),
-            });
-        }
-    }
-    // Clean shutdown complete: `finalize` closed the session above, so this
-    // heartbeat is `None` and clears meta.open_session (no stale crash
-    // marker); then the writer flushes its queue and exits.
-    let _ = tx_writer.send(WriterMsg::OpenSession {
-        session: tracker.open_session(),
-        now_ms: now_ms(),
-    });
-    let _ = tx_writer.send(WriterMsg::Shutdown);
-}
-
-/// Tracker outputs → the writer's messages.
-fn tracker_op(out: TrackerOutput) -> WriterMsg {
-    match out {
-        TrackerOutput::Session(session) => WriterMsg::Op(WriteOp::Session(session)),
-        TrackerOutput::Title(title) => WriterMsg::Op(WriteOp::Title(title)),
     }
 }
 
@@ -608,16 +564,21 @@ fn timer_tick(state: &TimerState, last_prune: &mut Option<u64>) {
 
 /// Runs one export cycle on its own thread (it may stream a lot and must not
 /// block the timer tick); `running` is the shared in-flight guard so the
-/// scheduled run and "Export now" can never overlap.
+/// scheduled run and "Export now" can never overlap. The flag is reset on
+/// EVERY path: a Drop guard inside the thread body covers panics/early
+/// returns, and a failed spawn resets it here (it must never latch `true`).
 fn spawn_export(
     db_path: PathBuf,
     store: SharedStore,
     export_folder: PathBuf,
     running: Arc<AtomicBool>,
 ) {
-    let _ = thread::Builder::new()
-        .name("pcw-export".into())
-        .spawn(move || {
+    let spawned = thread::Builder::new().name("pcw-export".into()).spawn({
+        let running = Arc::clone(&running);
+        move || {
+            // Drop guard FIRST (review finding 2): every exit path of the
+            // thread — normal, panic, early return — un-latches the flag.
+            let _guard = ExportRunningGuard(running);
             let now = now_ms();
             match pcw_export::run_export(&db_path, &store, &export_folder, now) {
                 Ok(report) => log::info!(
@@ -629,23 +590,42 @@ fn spawn_export(
                 ),
                 Err(e) => {
                     log::error!("export failed: {e}");
-                    let mut store = lock(&store);
-                    if let Err(e) = store.set_meta(META_LAST_EXPORT_FAILURE, &now.to_string()) {
+                    let mut store_guard = lock(&store);
+                    if let Err(e) = store_guard.set_meta(META_LAST_EXPORT_FAILURE, &now.to_string())
+                    {
                         log::error!("recording the export failure failed: {e}");
                     }
                 }
             }
-            running.store(false, Ordering::Relaxed);
-        });
+        }
+    });
+    if let Err(e) = spawned {
+        running.store(false, Ordering::Relaxed);
+        log::error!("spawning the export thread failed: {e}");
+    }
 }
 
-/// Everything a clean shutdown must own: the two stop flags, the shared
-/// signal sender, and the join handles of every thread (owned by the Exit
-/// menu action, which runs [`shutdown`]).
+/// Resets the shared export in-flight flag when dropped: created as the FIRST
+/// statement of the export thread body, so any exit path of that thread —
+/// normal, panic, early return — un-latches `export_running` (a latched flag
+/// would silently disable all future exports).
+struct ExportRunningGuard(Arc<AtomicBool>);
+
+impl Drop for ExportRunningGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Everything a clean shutdown must own: the two stop flags, the writer
+/// command channel, the shared signal sender, and the join handles of every
+/// thread (owned by the Exit menu action, which runs [`shutdown`]).
 struct AgentThreads {
     exit_flag: Arc<AtomicBool>,
+    tracker_stop: Arc<AtomicBool>,
     hooks: Option<HookHandle>,
     tx_signals: std::sync::mpsc::Sender<SessionSignal>,
+    tx_writer: std::sync::mpsc::Sender<WriterMsg>,
     ptr_stop: Arc<AtomicBool>,
     timer: JoinHandle<()>,
     ptr: Option<JoinHandle<()>>,
@@ -656,13 +636,16 @@ struct AgentThreads {
 }
 
 /// The Exit handler (tray, brief ordering): stop the ETW session, stop the
-/// hooks, wake the tracker (its finalize runs exactly once), stop the
-/// workers, flush the writer, persist the counters, join everything.
+/// hooks, raise the tracker stop flag (its finalize runs exactly once),
+/// then the workers, the tracker's shutdown messages, the writer, and the
+/// final counter persistence.
 fn shutdown(threads: AgentThreads, store: SharedStore, counters: Arc<Counters>) {
     let AgentThreads {
         exit_flag,
+        tracker_stop,
         hooks,
         tx_signals,
+        tx_writer,
         ptr_stop,
         timer: timer_thread,
         ptr: ptr_thread,
@@ -680,9 +663,15 @@ fn shutdown(threads: AgentThreads, store: SharedStore, counters: Arc<Counters>) 
         // Joins the hook thread; its signal sender dies with it.
         hooks.stop();
     }
-    // Drop the main thread's last sender: the tracker wakes on Disconnect,
-    // finalizes once and posts its outputs + `OpenSession {None}` +
-    // `WriterMsg::Shutdown` to the writer.
+    // The tracker's deterministic stop signal (does NOT rely on
+    // sender-disconnect: the pause-menu closure keeps a sender clone alive
+    // forever). Raised right after `hooks.stop()` per the brief ordering;
+    // the tracker notices it within 200 ms, finalizes once and posts its
+    // outputs + `OpenSession {None}` + `WriterMsg::Shutdown` to the writer.
+    tracker_stop.store(true, Ordering::Relaxed);
+    // Belt-and-braces for the secondary trigger: given every remaining
+    // sender is gone, a disconnect ends the tracker even if it somehow
+    // missed the flag (its own `finalize` runs exactly once regardless).
     drop(tx_signals);
 
     // Timer first (it polls the flag in 200 ms slices), then the PTR worker.
@@ -695,8 +684,13 @@ fn shutdown(threads: AgentThreads, store: SharedStore, counters: Arc<Counters>) 
     // with the session, which drains the pump before it is joined here.
     let _ = etw_thread.join();
     let _ = pump_thread.join();
-    // Tracker sends the last `WriterMsg::OpenSession {None}` + `Shutdown`.
+    // The tracker has already sent the last `WriterMsg::OpenSession {None}` +
+    // `Shutdown` via its stop signal; waiting for it is bounded (200 ms poll).
     let _ = tracker_thread.join();
+    // Belt-and-braces: if the tracker could not send `Shutdown` (e.g. its
+    // thread failed), this still ends the writer gracefully; a duplicate
+    // `Shutdown` is harmless (the writer is already gone or just breaks).
+    let _ = tx_writer.send(WriterMsg::Shutdown);
     // Writer flushes its queue and exits after `Shutdown`.
     let _ = writer_thread.join();
 

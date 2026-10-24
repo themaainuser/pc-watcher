@@ -101,11 +101,12 @@ pub fn install() -> Result<(), String> {
     let xml_file = write_temp_xml(&xml)?;
     let xml_arg = xml_file.to_string_lossy().to_string();
 
-    expect_ok(
-        schtasks_output(&["/Create", "/TN", TASK_NAME, "/XML", &xml_arg, "/F"])?,
-        "schtasks /Create",
-    )?;
-    let _ = fs::remove_file(&xml_file); // temp: cleanup is best-effort
+    let created = schtasks_output(&["/Create", "/TN", TASK_NAME, "/XML", &xml_arg, "/F"]);
+    // Best-effort temp cleanup on EVERY path after the file exists: /Create
+    // may fail and the schtasks invocation itself may not run — neither may
+    // leak the XML file.
+    let _ = fs::remove_file(&xml_file);
+    expect_ok(created?, "schtasks /Create")?;
     expect_ok(
         schtasks_output(&["/Run", "/TN", TASK_NAME])?,
         "schtasks /Run",
