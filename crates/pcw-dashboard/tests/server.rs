@@ -321,3 +321,20 @@ fn ui_has_no_external_urls() {
     let ui = include_str!("../src/ui.html").replace("http://www.w3.org/2000/svg", "");
     assert!(!ui.contains("http://") && !ui.contains("https://") && !ui.contains("//cdn"));
 }
+
+#[test]
+fn ui_default_dates_use_local_components() {
+    let ui = include_str!("../src/ui.html");
+    // Regression: `valueAsDate` interprets UTC calendar components, so on
+    // timezones east of UTC (e.g. UTC+5:30) the default `from`/`to` inputs
+    // stored yesterday's date and the default query returned zero rows.
+    // The fix builds a local "YYYY-MM-DD" string and assigns `.value`.
+    assert!(
+        !ui.contains("valueAsDate"),
+        "ui.html must not use valueAsDate (UTC-calendar interpretation bug)"
+    );
+    assert!(
+        ui.contains("getFullYear"),
+        "ui.html must construct the default dates from local date components"
+    );
+}

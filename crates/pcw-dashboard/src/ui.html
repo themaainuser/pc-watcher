@@ -133,11 +133,24 @@ function dateInputToMs(value) {
   return new Date(ymd[0], ymd[1] - 1, ymd[2]).getTime();
 }
 
+function localYmd() {
+  function pad(n) {
+    return n < 10 ? "0" + n : "" + n;
+  }
+  var now = new Date();
+  return (
+    now.getFullYear() + "-" + pad(now.getMonth() + 1) + "-" + pad(now.getDate())
+  );
+}
+
 function defaultDates() {
-  var midnight = new Date();
-  midnight.setHours(0, 0, 0, 0);
-  $("f-from").valueAsDate = midnight;
-  $("f-to").valueAsDate = midnight; // `to` is sent exclusive-day-end
+  // XXX DEPRECATED-DOM-API DO NOT REINTRODUCE: assigning a Date to
+  // date-input's UTC-interpreting property stored YESTERDAY's date on
+  // timezones east of UTC (e.g. UTC+5:30). Build the local "YYYY-MM-DD"
+  // string instead; `query()` reads `.value` and `dateInputToMs()` parses it
+  // as local time.
+  $("f-from").value = localYmd();
+  $("f-to").value = localYmd(); // `to` is sent exclusive-day-end (query() adds DAY_MS)
 }
 function resetFilters() {
   $("f-app").value = "";
