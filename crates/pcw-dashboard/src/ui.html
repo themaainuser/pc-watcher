@@ -1,0 +1,530 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PC Watcher</title>
+<style>
+  :root {
+    --bg: #12161c; --panel: #1a2029; --line: #262e3a; --text: #d7dee8;
+    --muted: #8b96a5; --accent: #4da3ff; --danger: #e05252;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Segoe UI", system-ui, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 10px 18px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  h1 { font-size: 16px; margin: 0 8px 0 0; }
+  .tab {
+    background: none; border: none; color: var(--muted); padding: 6px 10px;
+    font-size: 14px; cursor: pointer; border-bottom: 2px solid transparent;
+  }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  #stop {
+    margin-left: auto; background: var(--danger); color: #fff; border: none;
+    padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 14px;
+  }
+  #stop:disabled { opacity: 0.5; cursor: default; }
+  form#filters {
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+    padding: 10px 18px; border-bottom: 1px solid var(--line);
+  }
+  form#filters label { color: var(--muted); display: flex; gap: 6px; align-items: center; }
+  form#filters input, form#filters select {
+    background: var(--bg); color: var(--text); border: 1px solid var(--line);
+    border-radius: 4px; padding: 4px 8px; font-size: 13px;
+  }
+  form#filters button {
+    background: var(--accent); color: #08131f; border: none; border-radius: 4px;
+    padding: 5px 14px; cursor: pointer; font-size: 13px;
+  }
+  form#filters button#f-reset { background: none; color: var(--muted); }
+  main { padding: 18px; max-width: 900px; margin: 0 auto; }
+  h2 { font-size: 15px; margin: 4px 0 10px; }
+  h3 { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin: 18px 0 6px; }
+  .tiles { display: flex; gap: 10px; margin-bottom: 14px; }
+  .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px 16px; }
+  .tile b { font-size: 20px; display: block; }
+  .columns { display: flex; gap: 14px; flex-wrap: wrap; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; flex: 1 1 260px; }
+  .card ul { list-style: none; margin: 0; padding: 0; }
+  .card li { padding: 3px 0; }
+  .card button {
+    width: 100%; text-align: left; background: none; border: none; color: var(--accent);
+    cursor: pointer; padding: 3px 0; font-size: 14px; display: flex; justify-content: space-between; gap: 8px;
+  }
+  .card button .n { color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin-top: 4px; }
+  th, td { text-align: left; padding: 4px 10px 4px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  td.mono, th.mono { font-family: Consolas, monospace; font-size: 12px; }
+  .muted { color: var(--muted); }
+  .error { background: #3a1d1d; border: 1px solid var(--danger); border-radius: 6px; padding: 12px 16px; }
+  .notice { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px; }
+  .back {
+    background: none; border: 1px solid var(--line); color: var(--muted); border-radius: 4px;
+    padding: 3px 10px; cursor: pointer; margin-left: 8px; font-size: 12px;
+  }
+  .back:hover { color: var(--text); }
+  .chart { width: 100%; height: auto; display: block; margin-top: 6px; }
+  .subtotal { color: var(--muted); margin: 2px 0 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>PC Watcher</h1>
+  <button class="tab active" id="tab-overview" type="button">Overview</button>
+  <button class="tab" id="tab-usage" type="button">Usage</button>
+  <button id="stop" type="button">Stop</button>
+</header>
+<form id="filters" autocomplete="off">
+  <label>From <input type="date" id="f-from"></label>
+  <label>To <input type="date" id="f-to"></label>
+  <label>App <input type="text" id="f-app" placeholder="any" size="12"></label>
+  <label>Protocol
+    <select id="f-protocol">
+      <option value="">any</option>
+      <option value="tcp">tcp</option>
+      <option value="udp">udp</option>
+    </select>
+  </label>
+  <label>Port <input type="number" id="f-port" min="0" max="65535" placeholder="any" size="6"></label>
+  <label>Direction
+    <select id="f-direction">
+      <option value="">any</option>
+      <option value="out">out</option>
+      <option value="in">in</option>
+    </select>
+  </label>
+  <button type="submit">Apply</button>
+  <button type="button" id="f-reset">Reset</button>
+</form>
+<main id="view"></main>
+<script>
+"use strict";
+var SVG_NS = "http://www.w3.org/2000/svg";
+var DAY_MS = 86400000;
+var LIST_LIMIT = 300;
+
+var state = { view: "overview", app: "", service: "" };
+
+function $(id) { return document.getElementById(id); }
+function view() { return $("view"); }
+function el(tag, cls, text) {
+  var node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+function clearView() {
+  var v = view();
+  v.replaceChildren();
+  return v;
+}
+
+/* ---- filters ---- */
+
+function dateInputToMs(value) {
+  var ymd = value.split("-").map(Number);
+  return new Date(ymd[0], ymd[1] - 1, ymd[2]).getTime();
+}
+
+function defaultDates() {
+  var midnight = new Date();
+  midnight.setHours(0, 0, 0, 0);
+  $("f-from").valueAsDate = midnight;
+  $("f-to").valueAsDate = midnight; // `to` is sent exclusive-day-end
+}
+function resetFilters() {
+  $("f-app").value = "";
+  $("f-protocol").value = "";
+  $("f-port").value = "";
+  $("f-direction").value = "";
+  defaultDates();
+}
+
+function query(overrides) {
+  var params = new URLSearchParams();
+  var from = $("f-from").value;
+  var to = $("f-to").value;
+  if (from) params.set("from", String(dateInputToMs(from)));
+  if (to) params.set("to", String(dateInputToMs(to) + DAY_MS));
+  var app = $("f-app").value.trim();
+  if (app) params.set("app", app);
+  var proto = $("f-protocol").value;
+  if (proto) params.set("protocol", proto);
+  var port = $("f-port").value;
+  if (port) params.set("port", port);
+  var dir = $("f-direction").value;
+  if (dir) params.set("direction", dir);
+  for (var key in (overrides || {})) params.set(key, overrides[key]);
+  return params.toString();
+}
+
+/* ---- patterns ---- */
+
+function cell(row, content, cls) {
+  row.appendChild(el("td", cls, content));
+}
+function table(headers, rows) {
+  var t = el("table");
+  var thead = el("thead"); var tr = el("tr");
+  for (var i = 0; i < headers.length; i++) {
+    tr.appendChild(el("th", i === 0 ? "mono" : undefined, headers[i]));
+  }
+  thead.appendChild(tr); t.appendChild(thead);
+  var tbody = el("tbody");
+  for (var r = 0; r < rows.length; r++) tbody.appendChild(rows[r]);
+  t.appendChild(tbody);
+  return t;
+}
+
+async function api(path) {
+  var res = await fetch(path);
+  var body;
+  try { body = await res.json(); } catch (e) { body = {}; }
+  if (!res.ok) {
+    throw new Error(body.error || ("HTTP " + res.status));
+  }
+  return body;
+}
+
+function runLoad(loader) {
+  runLoad.promise = loader().catch(function (err) {
+    var v = clearView();
+    v.appendChild(el("div", "error", "Could not load data: " + err.message));
+  });
+}
+
+/* ---- formatting ---- */
+
+function fmtTime(ms) {
+  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+function fmtDateTime(ms) { return new Date(ms).toLocaleString(); }
+function fmtHm(secs) {
+  var h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60);
+  if (h === 0 && m === 0) return secs + "s";
+  return h + "h " + m + "m";
+}
+
+/* ---- hourly SVG bar chart ---- */
+
+function barChart(hourly) {
+  var counts = [];
+  for (var h = 0; h < 24; h++) counts[h] = 0;
+  for (var i = 0; i < hourly.length; i++) counts[hourly[i][0]] = hourly[i][1];
+  var max = Math.max.apply(null, counts.concat([1]));
+
+  var W = 480, H = 130, top = 24, base = H - 20;
+  var left = 10, inner = W - left * 2, bw = inner / 24;
+  var svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+  svg.setAttribute("class", "chart");
+
+  var axis = document.createElementNS(SVG_NS, "line");
+  axis.setAttribute("x1", left); axis.setAttribute("x2", W - left);
+  axis.setAttribute("y1", base); axis.setAttribute("y2", base);
+  axis.setAttribute("stroke", "#262e3a");
+  svg.appendChild(axis);
+
+  var cap = el("div", "muted", "");
+  cap.textContent = "peak hour: " + counts.indexOf(max) + "h (" + max + ")";
+  for (h = 0; h < 24; h++) {
+    if (counts[h] > 0) {
+      var bh = Math.round(counts[h] / max * (base - top));
+      var rect = document.createElementNS(SVG_NS, "rect");
+      rect.setAttribute("x", left + h * bw + 1);
+      rect.setAttribute("y", base - bh);
+      rect.setAttribute("width", bw - 2);
+      rect.setAttribute("height", bh);
+      rect.setAttribute("fill", "#4da3ff");
+      var label = document.createElementNS(SVG_NS, "title");
+      label.textContent = h + ":00 — " + counts[h] + " connections";
+      rect.appendChild(label);
+      svg.appendChild(rect);
+    }
+    if (h % 3 === 0) {
+      var tick = document.createElementNS(SVG_NS, "text");
+      tick.setAttribute("x", left + h * bw + bw / 2);
+      tick.setAttribute("y", H - 6);
+      tick.setAttribute("text-anchor", "middle");
+      tick.setAttribute("font-size", "9");
+      tick.setAttribute("fill", "#8b96a5");
+      tick.textContent = String(h);
+      svg.appendChild(tick);
+    }
+  }
+  var wrap = el("div");
+  wrap.appendChild(svg);
+  wrap.appendChild(cap);
+  return wrap;
+}
+
+/* ---- Overview ---- */
+
+function clickableList(items, onPick) {
+  var ul = el("ul");
+  for (var i = 0; i < items.length; i++) {
+    var li = el("li");
+    var btn = el("button");
+    btn.type = "button";
+    btn.appendChild(el("span", undefined, items[i][0]));
+    btn.appendChild(el("span", "n", String(items[i][1])));
+    (function (pick) { btn.addEventListener("click", function () { onPick(pick); }); })(items[i][0]);
+    li.appendChild(btn);
+    ul.appendChild(li);
+  }
+  return ul;
+}
+
+function connRow(c) {
+  var where = c.hostname ? c.hostname + " (" + c.remote_ip + ":" + c.remote_port + ")"
+                         : c.remote_ip + ":" + c.remote_port;
+  var tr = el("tr");
+  cell(tr, fmtDateTime(c.ts_first_ms), "mono");
+  cell(tr, c.process_name);
+  cell(tr, where, "mono");
+  cell(tr, c.protocol + " " + c.direction, "mono");
+  cell(tr, c.local_port, "mono");
+  return tr;
+}
+
+function connTable(connections) {
+  return table(["first seen", "app", "remote", "proto/dir", "local"], connections.map(connRow));
+}
+
+async function loadOverview() {
+  var d = await api("/api/overview?" + query());
+  var v = clearView();
+  v.appendChild(el("h2", undefined, "Overview"));
+
+  var tiles = el("div", "tiles");
+  var tile = el("div", "tile");
+  tile.appendChild(el("b", undefined, d.total_connections.toLocaleString()));
+  tile.appendChild(el("span", "muted", "connections"));
+  tiles.appendChild(tile);
+  v.appendChild(tiles);
+
+  if (d.total_connections === 0) {
+    v.appendChild(el("p", "notice", "No connections recorded in the selected range."));
+  }
+
+  var cols = el("div", "columns");
+  var apps = el("div", "card");
+  apps.appendChild(el("h3", undefined, "Top apps"));
+  apps.appendChild(clickableList(d.top_apps, pickApp));
+  cols.appendChild(apps);
+  var services = el("div", "card");
+  services.appendChild(el("h3", undefined, "Top services"));
+  services.appendChild(clickableList(d.top_services, pickService));
+  cols.appendChild(services);
+  var hourCard = el("div", "card");
+  hourCard.appendChild(el("h3", undefined, "Hourly activity"));
+  hourCard.appendChild(barChart(d.hourly));
+  cols.appendChild(hourCard);
+  v.appendChild(cols);
+}
+
+/* ---- App drill-down ---- */
+
+function pickApp(name) { state.app = name; state.service = ""; showView("app"); }
+function pickService(key) { state.service = key; state.app = ""; showView("service"); }
+
+async function loadApp(name) {
+  var d = await api("/api/app?" + query({ name: name, limit: LIST_LIMIT }));
+  var v = clearView();
+  var head = el("h2", undefined, "App: " + name);
+  var back = el("button", "back");
+  back.type = "button";
+  back.textContent = "Overview";
+  back.addEventListener("click", function () { showView("overview"); });
+  head.appendChild(back);
+  v.appendChild(head);
+
+  v.appendChild(el("p", "subtotal", "Foreground usage: " +
+    d.usage.session_count + " session(s), " + fmtHm(d.usage.total_secs)));
+
+  v.appendChild(el("h3", undefined, "Destinations"));
+  if (d.destinations.length === 0) {
+    v.appendChild(el("p", "muted", "No destinations in the selected range."));
+  } else {
+    v.appendChild(table(["remote", "proto", "count", "first seen", "last seen"],
+      d.destinations.map(function (dest) {
+        var tr = el("tr");
+        cell(tr, dest.hostname ? dest.hostname + " (" + dest.remote_ip + ":" + dest.remote_port + ")"
+                               : dest.remote_ip + ":" + dest.remote_port, "mono");
+        cell(tr, dest.protocol, "mono");
+        cell(tr, dest.count.toLocaleString());
+        cell(tr, fmtDateTime(dest.ts_first_ms), "mono");
+        cell(tr, fmtDateTime(dest.ts_last_ms), "mono");
+        return tr;
+      })));
+  }
+
+  v.appendChild(el("h3", undefined, "Connections (newest first, capped)"));
+  if (d.connections.length === 0) {
+    v.appendChild(el("p", "muted", "No connections in the selected range."));
+  } else {
+    v.appendChild(connTable(d.connections));
+  }
+
+  v.appendChild(el("h3", undefined, "Window titles"));
+  if (d.titles.length === 0) {
+    v.appendChild(el("p", "muted", "No titles recorded."));
+  } else {
+    var ul = el("ul");
+    for (var i = d.titles.length - 1; i >= Math.max(0, d.titles.length - 20); i--) {
+      var li = el("li", "mono", fmtDateTime(d.titles[i].ts_ms) + " — " + d.titles[i].title);
+      ul.appendChild(li);
+    }
+    v.appendChild(ul);
+  }
+}
+
+/* ---- Service drill-down ---- */
+
+async function loadService(key) {
+  var d = await api("/api/service?" + query({ key: key, limit: LIST_LIMIT }));
+  var v = clearView();
+  var head = el("h2", undefined, "Service: " + key);
+  var back = el("button", "back");
+  back.type = "button";
+  back.textContent = "Overview";
+  back.addEventListener("click", function () { showView("overview"); });
+  head.appendChild(back);
+  v.appendChild(head);
+
+  // Which apps talked to it: tallied from the capped rows the server sent.
+  var perApp = {}, order = [];
+  for (var i = 0; i < d.connections.length; i++) {
+    var app = d.connections[i].process_name;
+    if (!perApp.hasOwnProperty(app)) { perApp[app] = 0; order.push(app); }
+    perApp[app] += 1;
+  }
+  if (order.length > 0) {
+    var list = order.map(function (name) { return [name, perApp[name]]; })
+      .sort(function (a, b) { return b[1] - a[1]; });
+    var card = el("div", "card");
+    card.appendChild(el("h3", undefined, "Apps that talked to it"));
+    card.appendChild(clickableList(list, pickApp));
+    v.appendChild(card);
+  }
+
+  v.appendChild(el("h3", undefined, "Connections (newest first, capped)"));
+  if (d.connections.length === 0) {
+    v.appendChild(el("p", "muted", "Nothing talked to this service in the selected range."));
+  } else {
+    v.appendChild(connTable(d.connections));
+  }
+}
+
+/* ---- Usage ---- */
+
+async function loadUsage() {
+  var d = await api("/api/usage?" + query());
+  var v = clearView();
+  v.appendChild(el("h2", undefined, "Usage"));
+
+  var totals = {}, order = [];
+  for (var i = 0; i < d.sessions.length; i++) {
+    var name = d.sessions[i].process_name;
+    var secs = Math.max(0, Math.floor((d.sessions[i].ts_end_ms - d.sessions[i].ts_start_ms) / 1000));
+    if (!totals.hasOwnProperty(name)) { totals[name] = 0; order.push(name); }
+    totals[name] += secs;
+  }
+  v.appendChild(el("h3", undefined, "Totals per app"));
+  if (order.length === 0) {
+    v.appendChild(el("p", "muted", "No foreground sessions in the selected range."));
+  } else {
+    var ranked = order.map(function (app) { return [app, totals[app]]; })
+      .sort(function (a, b) { return b[1] - a[1]; });
+    v.appendChild(table(["app", "foreground time", "sessions"],
+      ranked.map(function (row) {
+        var c = 0;
+        for (var k = 0; k < d.sessions.length; k++) {
+          if (d.sessions[k].process_name === row[0]) c++;
+        }
+        var tr = el("tr");
+        cell(tr, row[0], "mono");
+        cell(tr, fmtHm(row[1]));
+        cell(tr, String(c));
+        return tr;
+      })));
+  }
+
+  v.appendChild(el("h3", undefined, "Foreground sessions"));
+  if (d.sessions.length > 0) {
+    v.appendChild(table(["start", "end", "app", "window title"],
+      d.sessions.map(function (s) {
+        var tr = el("tr");
+        cell(tr, fmtDateTime(s.ts_start_ms), "mono");
+        cell(tr, fmtDateTime(s.ts_end_ms), "mono");
+        cell(tr, s.process_name, "mono");
+        cell(tr, s.window_title);
+        return tr;
+      })));
+  }
+
+  v.appendChild(el("h3", undefined, "Title log"));
+  if (d.titles.length === 0) {
+    v.appendChild(el("p", "muted", "No titles recorded."));
+  } else {
+    v.appendChild(table(["time", "app", "title"],
+      d.titles.map(function (t) {
+        var tr = el("tr");
+        cell(tr, fmtDateTime(t.ts_ms), "mono");
+        cell(tr, t.process_name, "mono");
+        cell(tr, t.title);
+        return tr;
+      })));
+  }
+}
+
+/* ---- wiring ---- */
+
+function showView(name) {
+  state.view = name;
+  $("tab-overview").className = "tab" + (name === "overview" ? " active" : "");
+  $("tab-usage").className = "tab" + (name === "usage" ? " active" : "");
+  runLoad(function () {
+    if (state.view === "overview") return loadOverview();
+    if (state.view === "app") return loadApp(state.app);
+    if (state.view === "service") return loadService(state.service);
+    return loadUsage();
+  });
+}
+function showViewRef(name) { return function () { showView(name); }; }
+
+$("tab-overview").addEventListener("click", function () {
+  state.app = ""; state.service = ""; showView("overview");
+});
+$("tab-usage").addEventListener("click", function () {
+  state.app = ""; state.service = ""; showView("usage");
+});
+$("filters").addEventListener("submit", function (event) {
+  event.preventDefault();
+  showView(state.view);
+});
+$("f-reset").addEventListener("click", function () {
+  resetFilters();
+  showView(state.view);
+});
+$("stop").addEventListener("click", function () {
+  var stop = $("stop");
+  stop.disabled = true;
+  fetch("/api/shutdown", { method: "POST" }).catch(function () {}).then(function () {
+    var v = clearView();
+    v.appendChild(el("p", "notice", "Dashboard stopped — the server has exited. You can close this window."));
+  });
+});
+
+defaultDates();
+showView("overview");
+</script>
+</body>
+</html>

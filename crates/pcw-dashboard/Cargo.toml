@@ -5,3 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+tiny_http = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+pcw-storage = { path = "../pcw-storage" }
+pcw-types = { path = "../pcw-types" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
