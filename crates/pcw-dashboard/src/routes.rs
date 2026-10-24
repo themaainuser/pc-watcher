@@ -3,8 +3,9 @@
 //! Splitting them off `lib.rs` keeps the server loop free of URL plumbing
 //! and lets [`parse_filter`] stay pure (unit-testable without the server).
 //! Every handler is a short-lived function over a `&Store`: no state is
-//! kept between requests (F16a), every list query is bounded by an explicit
-//! limit, and no query selects unbounded rows into JSON.
+//! kept between requests (F16a), the connection list queries are bounded by
+//! an explicit `limit`, and all JSON goes through [`json_data_resp`], which
+//! lowercases enum-typed fields at this boundary (F9).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -39,6 +40,41 @@ fn json_resp(status: u16, body: Vec<u8>) -> Resp {
         status,
         content_type: "application/json",
         body,
+    }
+}
+
+/// The response of one data route (ledger F9): its JSON has every
+/// `protocol`/`direction` field lowercased (`"Tcp"` → `"tcp"`,
+/// `"Out"` → `"out"`) before encoding, because the filter API accepts only
+/// lowercase values — responses must speak the same casing as their inputs.
+/// The shared `Protocol`/`Direction` serde derives in `pcw-types` stay
+/// PascalCase untouched: other approved tasks (the export JSON) already
+/// publish those names, so the conversion happens on this boundary only.
+fn json_data_resp(mut value: serde_json::Value) -> Resp {
+    lowercase_enums(&mut value);
+    let body = serde_json::to_vec(&value).expect("data JSON cannot fail to serialize");
+    json_resp(200, body)
+}
+
+/// Recursively maps the string value of any `protocol`/`direction` key to
+/// lowercase and leaves every other field (even an app *name* like
+/// "Tcp Chat") untouched. Already-lowercase values are unchanged, so the
+/// pass is idempotent.
+fn lowercase_enums(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, field) in map {
+                if matches!(key.as_str(), "protocol" | "direction") {
+                    if let serde_json::Value::String(text) = field {
+                        *text = text.to_lowercase();
+                    }
+                } else {
+                    lowercase_enums(field);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(lowercase_enums),
+        _ => {}
     }
 }
 
@@ -139,8 +175,10 @@ fn open_store<'a>(db_path: &Path, slot: &'a mut Option<Store>) -> Option<&'a Sto
 
 fn route_overview(store: &Store, filter: &ConnFilter) -> Result<Resp, pcw_storage::StorageError> {
     let summary = store.overview(filter)?;
-    let body = serde_json::to_vec(&summary).expect("overview JSON cannot fail to serialize");
-    Ok(json_resp(200, body))
+    let json = serde_json::to_value(&summary).expect("overview JSON cannot fail to serialize");
+    // `OverviewSummary` carries no enum fields; the F9 pass is applied here
+    // so *every* data route crosses the same checked boundary.
+    Ok(json_data_resp(json))
 }
 
 /// `GET /api/app?name=…&limit=…&<filter>` →
@@ -165,14 +203,13 @@ fn route_app(
     let connections = store.connections(&drill, limit)?;
     let usage = store.usage_summary(name, drill.from_ms, drill.to_ms)?;
     let titles = store.titles(drill.from_ms, drill.to_ms, Some(name))?;
-    let body = serde_json::to_vec(&serde_json::json!({
-        "destinations": destinations,
-        "connections": connections,
+    let json = serde_json::json!({
+        "destinations": destinations,  // DestinationRow → `protocol` lowercased
+        "connections": connections,    // ConnectionRow → `protocol`, `direction` lowercased
         "usage": usage,
         "titles": titles,
-    }))
-    .expect("app drill-down JSON cannot fail to serialize");
-    Ok(json_resp(200, body))
+    });
+    Ok(json_data_resp(json))
 }
 
 /// `GET /api/service?key=…&limit=…&<filter>` → the connections to that
@@ -191,9 +228,10 @@ fn route_service(
         Err(msg) => return Ok(err_resp(400, &msg)),
     };
     let connections = store.service_connections(key, filter, limit)?;
-    let body = serde_json::to_vec(&serde_json::json!({ "connections": connections }))
-        .expect("service JSON cannot fail to serialize");
-    Ok(json_resp(200, body))
+    let json = serde_json::json!({
+        "connections": connections, // ConnectionRow → `protocol`, `direction` lowercased
+    });
+    Ok(json_data_resp(json))
 }
 
 /// `GET /api/usage?from&to&app` → `{"sessions", "titles"}`: the foreground
@@ -201,12 +239,11 @@ fn route_service(
 fn route_usage(store: &Store, filter: &ConnFilter) -> Result<Resp, pcw_storage::StorageError> {
     let sessions = store.sessions(filter.from_ms, filter.to_ms, filter.app.as_deref())?;
     let titles = store.titles(filter.from_ms, filter.to_ms, filter.app.as_deref())?;
-    let body = serde_json::to_vec(&serde_json::json!({
+    let json = serde_json::json!({
         "sessions": sessions,
         "titles": titles,
-    }))
-    .expect("usage JSON cannot fail to serialize");
-    Ok(json_resp(200, body))
+    });
+    Ok(json_data_resp(json))
 }
 
 /// Parses the bounded list cap: `limit=<u32>`, clamped to `[1, MAX_LIMIT]`,

@@ -187,6 +187,22 @@ fn app_endpoint_has_drill_down_shape() {
         !value["connections"].as_array().unwrap().is_empty(),
         "seeded a.exe must have at least one connection"
     );
+    // Ledger F9: the filter API accepts only lowercase (`protocol=tcp`|
+    // `udp`, `direction=out`|`in`), so the response must speak the same
+    // casing. The seed uses `Protocol::Tcp` + `Direction::Out`, which serde
+    // would otherwise emit as "Tcp"/"Out".
+    assert!(
+        body.contains(r#""protocol":"tcp""#),
+        "destinations/connections must lowercase protocol, body: {body}"
+    );
+    assert!(
+        body.contains(r#""direction":"out""#),
+        "connections must lowercase direction, body: {body}"
+    );
+    assert!(
+        !body.contains(r#""protocol":"Tcp""#) && !body.contains(r#""direction":"Out""#),
+        "no PascalCase enum values may survive the boundary, body: {body}"
+    );
 }
 
 #[test]
