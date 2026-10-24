@@ -1576,6 +1576,10 @@ dependencies = [
 [[package]]
 name = "pcw-dash"
 version = "0.1.0"
+dependencies = [
+ "pcw-config",
+ "pcw-dashboard",
+]
 
 [[package]]
 name = "pcw-dashboard"

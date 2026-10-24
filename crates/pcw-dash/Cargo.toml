@@ -5,3 +5,5 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+pcw-config = { path = "../pcw-config" }
+pcw-dashboard = { path = "../pcw-dashboard" }
