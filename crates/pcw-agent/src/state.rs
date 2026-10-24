@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use pcw_etw::supervisor::Supervisor;
 use pcw_foreground::OpenSession;
 use pcw_storage::{StorageError, Store, WriteOp};
 use pcw_types::{AppSession, COUNTER_KEYS, Counters};
@@ -51,9 +52,11 @@ pub fn save_open_session(
 
 /// Recovers the session saved by a previous run: inserts the session row
 /// [`ts_start_ms`, `saved_at_ms`] and clears the key, so the data only ever
-/// exists once. Returns the inserted session — the caller (Task 13) re-opens
-/// the live tracker on it. Absent or corrupt key ⇒ `Ok(None)`; a corrupt JSON
-/// blob is deleted rather than resurrected (fresh installs start clean).
+/// exists once. Returns the inserted session as a closed session row (spec
+/// §4.3 requires only the write — the caller (Task 13) merely logs it, the
+/// tracker is not re-opened on it). Absent or corrupt key ⇒ `Ok(None)`; a
+/// corrupt JSON blob is deleted rather than resurrected (fresh installs
+/// start clean).
 pub fn recover_open_session(store: &mut Store) -> Result<Option<AppSession>, StorageError> {
     let Some(raw) = store.get_meta(OPEN_SESSION_KEY)? else {
         return Ok(None);
@@ -97,6 +100,22 @@ pub fn load_counters(store: &Store, c: &Counters) -> Result<(), StorageError> {
         }
     }
     Ok(())
+}
+
+/// Builds this run's ETW supervisor from the loaded lifetime counters. The
+/// three supervisor keys (`watchdog_restarts`, `etw_events_lost`,
+/// `etw_buffers_lost`) are lifetime-cumulative, and the first timer tick
+/// publishes the supervisor's values over them — a fresh supervisor would
+/// reset them to 0 on that tick (review finding: lifetime supervisor
+/// counters). Seeding gives the supervisor itself the cumulative semantics:
+/// later `on_stats`/`on_exit` results add on top of the loaded totals, only
+/// the per-session baselines reset.
+pub fn resume_supervisor(counters: &Counters) -> Supervisor {
+    Supervisor::with_totals(
+        counters.get("watchdog_restarts"),
+        counters.get("etw_events_lost"),
+        counters.get("etw_buffers_lost"),
+    )
 }
 
 /// Bridges a serde error into [`StorageError`]: `to_string` on these structs

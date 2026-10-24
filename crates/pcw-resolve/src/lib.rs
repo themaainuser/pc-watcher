@@ -14,10 +14,10 @@ use std::sync::{Arc, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dns_lookup::lookup_addr;
+use log::error;
 use thiserror::Error;
 
 use pcw_storage::{SharedStore, StorageError};
-
 /// Names an IP, or `None` when it has no PTR record.
 pub trait NameResolver {
     fn lookup(&self, ip: &str) -> Option<String>;
@@ -86,8 +86,11 @@ pub fn run_worker(db: SharedStore, stop: Arc<AtomicBool>, interval: Duration, li
             return;
         }
         // Storage errors (e.g. disk full in Task 10's mode) are not
-        // crash-worthy for a background worker; the next round retries.
-        let _ = resolve_pending(&db, &SystemResolver, limit, now_ms());
+        // crash-worthy for a background worker; the next round retries —
+        // but the failure is logged, not swallowed silently.
+        if let Err(e) = resolve_pending(&db, &SystemResolver, limit, now_ms()) {
+            error!("resolve round failed: {e}");
+        }
         let mut waited = Duration::ZERO;
         while waited < interval && !stop.load(Ordering::Relaxed) {
             std::thread::sleep(slice);

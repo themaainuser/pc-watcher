@@ -36,6 +36,12 @@ impl Counters {
         }
     }
 
+    /// Current value of one counter key (0 for an unknown key).
+    pub fn get(&self, key: &str) -> u64 {
+        self.slot(key)
+            .map_or(0, |slot| slot.load(Ordering::Relaxed))
+    }
+
     /// Returns all six counters as (key, value), in `COUNTER_KEYS` order.
     pub fn snapshot(&self) -> Vec<(&'static str, u64)> {
         COUNTER_KEYS

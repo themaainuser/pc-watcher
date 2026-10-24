@@ -12,18 +12,23 @@ use std::time::Duration;
 
 use pcw_config::Config;
 use pcw_dashboard::{DashError, DashServer};
+use pcw_foreground::attach_parent_console;
 
 /// Shut down the dashboard after one hour with no requests (spec §5).
 const IDLE_TIMEOUT: Duration = Duration::from_secs(3600);
 
 fn main() {
+    // Diagnostics when started from a terminal; a tray/dashboard launch has
+    // no console and the attach silently does nothing (spec §5, same as the
+    // agent's CLI).
+    attach_parent_console();
+
     // `--port N` wins over the config's dashboard_port.
     let arg_port = parse_port_arg(&std::env::args().collect::<Vec<_>>());
 
     let data_dir = match pcw_config::default_data_dir() {
         Ok(dir) => dir,
         Err(_) => {
-            // A windows-subsystem process has no console: best-effort only.
             eprintln!(
                 "pcw-dash: cannot determine the data directory (PCW_DATA_DIR/LOCALAPPDATA unset)"
             );
@@ -43,7 +48,10 @@ fn main() {
 
     match DashServer::bind(port) {
         Ok(server) => {
-            open_browser(port);
+            // The actually bound port, not the requested one: a `--port 0`
+            // leaves the URL dead, the bound port does not.
+            let bound = server.local_addr().port();
+            open_browser(bound);
             // The route handler for `POST /api/shutdown` (the UI's Stop
             // button) sets this flag, which makes `run` return.
             let stop = Arc::new(AtomicBool::new(false));
@@ -53,14 +61,15 @@ fn main() {
             }
         }
         // A dashboard is already serving this port: open the browser to it
-        // and quit successfully instead of failing on a second bind.
+        // (the requested port, since no server exists here to ask) and quit
+        // successfully instead of failing on a second bind.
         Err(DashError::PortInUse) => {
             open_browser(port);
             std::process::exit(0);
         }
         Err(e) => {
-            // No console to report to; note the choice: nothing is written
-            // anywhere (the agent's agent.log only sees agent-side events).
+            // Reachable when launched from a terminal (the attach above):
+            // report to the console; a tray/dashboard launch sees nothing.
             eprintln!("pcw-dash: {e}");
             std::process::exit(1);
         }

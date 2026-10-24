@@ -18,7 +18,9 @@ pub struct RateLimiter {
     cap_per_sec: u32,
     last_sweep: u64,
     buckets: HashMap<(u32, IpAddr, u16), Bucket>,
-    /// How many datagrams this limiter has rejected.
+    /// How many datagrams this limiter has rejected. Test-observable state
+    /// (tests assert on it directly); production counts rejections via the
+    /// `udp_capped` counter in `source.rs`, which resets per session anyway.
     pub capped: u64,
 }
 

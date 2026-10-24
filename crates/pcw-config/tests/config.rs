@@ -1,6 +1,22 @@
 use std::path::PathBuf;
 
-use pcw_config::{Config, ConfigError, data_dir_from};
+use pcw_config::{Config, ConfigError, data_dir_from, parse_export_schedule};
+
+#[test]
+fn export_schedule_days_are_mapped() {
+    // Named schedules (spec §7 "weekly (configurable)" + the §8 default).
+    assert_eq!(parse_export_schedule("daily"), Some(1));
+    assert_eq!(parse_export_schedule("weekly"), Some(7));
+    assert_eq!(parse_export_schedule("monthly"), Some(30));
+    // A plain integer is a day count.
+    assert_eq!(parse_export_schedule("3"), Some(3));
+    assert_eq!(parse_export_schedule(" 14 "), Some(14));
+    // Unparseable values are rejected (the agent falls back to weekly).
+    assert_eq!(parse_export_schedule("fortnightly"), None);
+    assert_eq!(parse_export_schedule("0"), None);
+    assert_eq!(parse_export_schedule("1.5"), None);
+    assert_eq!(parse_export_schedule(""), None);
+}
 
 #[test]
 fn creates_default_config_with_spec_values() {

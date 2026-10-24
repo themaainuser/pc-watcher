@@ -90,6 +90,11 @@ udp_rate_cap = 0                # 0 = off; thinning fallback, §4.1
 min_free_disk_gb = 2            # below this, UDP datagram rows stop, §4.6
 ```
 
+`export_schedule` accepts `daily` (1 day), `weekly` (7 days), `monthly`
+(30 days), or a plain integer number of days (for example `14`). Anything
+else falls back to weekly and is logged at startup; the tray's
+`export overdue` warning follows the same period (one day beyond it).
+
 ## Dashboard usage
 
 - `pcw-dash.exe` is on-demand: start it from the tray

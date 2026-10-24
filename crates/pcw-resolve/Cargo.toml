@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 dns-lookup = { workspace = true }
+log = { workspace = true }
 thiserror = { workspace = true }
 pcw-storage = { path = "../pcw-storage" }
 

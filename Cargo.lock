@@ -1579,6 +1579,7 @@ version = "0.1.0"
 dependencies = [
  "pcw-config",
  "pcw-dashboard",
+ "pcw-foreground",
 ]
 
 [[package]]
@@ -1630,6 +1631,7 @@ name = "pcw-resolve"
 version = "0.1.0"
 dependencies = [
  "dns-lookup",
+ "log",
  "pcw-storage",
  "pcw-types",
  "tempfile",

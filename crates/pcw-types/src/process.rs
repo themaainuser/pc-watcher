@@ -7,6 +7,12 @@ pub fn file_name_of(path: &str) -> String {
 
 pub type SharedProcessCache = Arc<Mutex<ProcessCache>>;
 
+/// Cap per map (`fallback`, `cache`). Exceeding it clears the map wholesale:
+/// every entry is re-derivable from ETW Kernel-Process events and the Win32
+/// query, so a clear only costs re-resolution and bounds the memory of the
+/// pid-keyed maps (same shape as the store's `SEEN_IP_CAP`).
+const CACHE_CAP: usize = 10_000;
+
 pub struct ProcessCache {
     query: Box<dyn FnMut(u32) -> Option<(String, String)> + Send>,
     /// pid -> (name, path) for successful lookups.
@@ -33,6 +39,9 @@ impl ProcessCache {
         match (*self.query)(pid) {
             Some((name, path)) => {
                 self.cache.insert(pid, (name.clone(), path.clone()));
+                if self.cache.len() > CACHE_CAP {
+                    self.cache.clear();
+                }
                 (name, path)
             }
             None => match self.fallback.get(&pid) {
@@ -51,6 +60,9 @@ impl ProcessCache {
             self.cache.remove(&pid);
         }
         self.fallback.insert(pid, image_path.to_string());
+        if self.fallback.len() > CACHE_CAP {
+            self.fallback.clear();
+        }
     }
 }
 
@@ -79,5 +91,27 @@ mod tests {
         let mut c = ProcessCache::new(Box::new(|_| Some(("a.exe".into(), "C:\\a.exe".into()))));
         c.note_process(2, "C:\\old.exe", false);
         assert_eq!(c.get(2), ("a.exe".to_string(), "C:\\a.exe".to_string()));
+    }
+
+    /// More inserts than the cap leave both maps at or below `CACHE_CAP`:
+    /// exceeding a map clears it wholesale (entries re-derive from the next
+    /// ETW Kernel-Process events / Win32 query).
+    #[test]
+    fn exceeding_the_cap_clears_wholesale() {
+        let mut c = ProcessCache::new(Box::new(|pid| {
+            Some((format!("p{pid}.exe"), format!(r"C:\p{pid}.exe")))
+        }));
+        // Drives `fallback` past the cap through stop events and `cache`
+        // past it through successful queries.
+        for pid in 0..(CACHE_CAP as u32 + 100) {
+            c.note_process(pid, &format!(r"C:\p{pid}.exe"), false);
+            c.get(pid);
+            assert!(c.fallback.len() <= CACHE_CAP);
+            assert!(c.cache.len() <= CACHE_CAP);
+        }
+        // A cleared map still answers: new entries accumulate again.
+        c.cache.clear();
+        c.fallback.clear();
+        assert_eq!(c.get(CACHE_CAP as u32).0, format!("p{}.exe", CACHE_CAP));
     }
 }

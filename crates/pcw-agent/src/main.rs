@@ -29,7 +29,7 @@ const TIMER_TICK: Duration = Duration::from_secs(60);
 /// Sleep granularity of all polling loops (fast exit response).
 const TICK_SLICE: Duration = Duration::from_millis(200);
 const HOUR_MS: u64 = 3_600_000;
-const SEVEN_DAYS_MS: u64 = 7 * 86_400_000;
+const DAY_MS: u64 = 86_400_000;
 /// Chunked prune (plan: `prune_step(retention_days, now, 50_000)`).
 const PRUNE_MAX_ROWS: u32 = 50_000;
 const PRUNE_PERIOD_MS: u64 = 3_600_000;
@@ -160,13 +160,29 @@ fn run_agent() {
 
     let paused = Arc::new(AtomicBool::new(false));
     let exit_flag = Arc::new(AtomicBool::new(false));
-    let supervisor = Arc::new(Mutex::new(Supervisor::new()));
+    // Seeded from the loaded counters: the three supervisor keys are
+    // lifetime-cumulative and the first timer tick publishes the
+    // supervisor's values over them (a fresh supervisor would zero them).
+    let supervisor = Arc::new(Mutex::new(state::resume_supervisor(&counters)));
     let export_running = Arc::new(AtomicBool::new(false));
     // Tracker stop: raised by `shutdown` right after `hooks.stop()`; the
     // tracker's loop polls it in 200 ms slices (pcw_agent::tracker).
     let tracker_stop = Arc::new(AtomicBool::new(false));
     let db_path = data_dir.join("data.db");
     let min_free_bytes = u64::from(cfg.min_free_disk_gb).saturating_mul(BYTES_PER_GB);
+    // Export period (spec §7 "weekly (configurable)"): daily/weekly/monthly
+    // or a plain day count; anything else falls back to weekly with a log.
+    let export_period_days = match pcw_config::parse_export_schedule(&cfg.export_schedule) {
+        Some(days) => days,
+        None => {
+            log::info!(
+                "config.export_schedule '{}' is not daily/weekly/monthly or a day count; using weekly",
+                cfg.export_schedule
+            );
+            7
+        }
+    };
+    let export_period_ms = export_period_days.saturating_mul(DAY_MS);
 
     // ---- writer thread -------------------------------------------------
     let (tx_writer, rx_writer) = std::sync::mpsc::channel::<WriterMsg>();
@@ -301,6 +317,7 @@ fn run_agent() {
         export_folder: cfg.export_folder.clone(),
         export_running: Arc::clone(&export_running),
         retention_days: cfg.retention_days,
+        export_period_ms,
         min_free_bytes,
     };
     let timer_thread = thread::Builder::new()
@@ -388,7 +405,13 @@ fn run_agent() {
     tray::run_main_loop(
         event_loop,
         handlers,
-        &tray::tooltip_text(false, last_export_initial, now_ms(), low_disk_initial),
+        &tray::tooltip_text(
+            false,
+            last_export_initial,
+            now_ms(),
+            low_disk_initial,
+            export_period_ms,
+        ),
     );
 }
 
@@ -464,6 +487,9 @@ struct TimerState {
     export_folder: PathBuf,
     export_running: Arc<AtomicBool>,
     retention_days: u32,
+    /// Export period in ms (spec §7, `export_schedule` mapped by
+    /// `pcw_config::parse_export_schedule`, weekly fallback).
+    export_period_ms: u64,
     min_free_bytes: u64,
 }
 
@@ -521,6 +547,13 @@ fn timer_tick(state: &TimerState, last_prune: &mut Option<u64>) {
     // lock between the transactions (brief line 15, step 6).
     if due(now, *last_prune, PRUNE_PERIOD_MS) {
         loop {
+            // Quitting must not wait for the whole prune backlog: check
+            // between steps so shutdown only ever waits for the current
+            // prune_step transaction to end (steps are never interrupted
+            // mid-transaction).
+            if state.exit_flag.load(Ordering::Relaxed) {
+                break;
+            }
             let deleted = {
                 let mut store = lock(&state.store);
                 match store.prune_step(state.retention_days, now, PRUNE_MAX_ROWS) {
@@ -538,12 +571,13 @@ fn timer_tick(state: &TimerState, last_prune: &mut Option<u64>) {
         *last_prune = Some(now);
     }
 
-    // Export schedule: absent `last_export` or ≥ 7 days, retried hourly after
-    // a failed attempt (review flag F10: a failed run_export may still have
-    // published the folder — the retry rule re-runs on its own).
+    // Export schedule: absent `last_export` or the configured period since
+    // (`export_schedule`, weekly by default), retried hourly after a failed
+    // attempt (review flag F10: a failed run_export may still have published
+    // the folder — the retry rule re-runs on its own).
     let last_export = meta_u64(&state.store, "last_export");
     let last_failure = meta_u64(&state.store, META_LAST_EXPORT_FAILURE);
-    if due(now, last_export, SEVEN_DAYS_MS)
+    if due(now, last_export, state.export_period_ms)
         && due(now, last_failure, HOUR_MS)
         && !state.export_running.swap(true, Ordering::Relaxed)
     {
@@ -558,7 +592,13 @@ fn timer_tick(state: &TimerState, last_prune: &mut Option<u64>) {
     // Tray status line.
     let paused_now = state.paused.load(Ordering::Relaxed);
     let low_disk = free_disk_bytes(&state.data_dir).is_some_and(|free| free < state.min_free_bytes);
-    let text = tray::tooltip_text(paused_now, last_export, now, low_disk);
+    let text = tray::tooltip_text(
+        paused_now,
+        last_export,
+        now,
+        low_disk,
+        state.export_period_ms,
+    );
     let _ = state.proxy.send_event(tray::TraySignal::Tooltip(text));
 }
 

@@ -31,9 +31,6 @@ pub const ID_EXIT: &str = "pcw-exit";
 const PAUSE_LABEL: &str = "Pause";
 const RESUME_LABEL: &str = "Resume";
 const DAY_MS: u64 = 86_400_000;
-/// `export overdue` warns strictly after this long without an export;
-/// `never` (no export yet) counts as overdue.
-const OVERDUE_MS: u64 = 8 * DAY_MS;
 
 /// The five menu actions of spec §5.1, provided by main.rs where the data
 /// they need lives.
@@ -151,14 +148,16 @@ pub fn run_main_loop(
 }
 
 /// `PC-Watcher — collecting|paused · last export <date|never>` plus the
-/// warnings: `· export overdue` (> 8 days, or no export yet) and
-/// `· low disk`.
+/// warnings: `· export overdue` (more than one day beyond `period_ms`, the
+/// configured export period of `export_schedule` — so the weekly default
+/// warns after 8 days; no export yet counts as overdue) and `· low disk`.
 #[must_use]
 pub fn tooltip_text(
     paused: bool,
     last_export_ms: Option<u64>,
     now_ms: u64,
     low_disk: bool,
+    period_ms: u64,
 ) -> String {
     let status = if paused { "paused" } else { "collecting" };
     let last = match last_export_ms {
@@ -166,7 +165,8 @@ pub fn tooltip_text(
         None => "never".to_string(),
     };
     let mut text = format!("PC-Watcher — {status} · last export {last}");
-    if last_export_ms.is_none_or(|ms| now_ms.saturating_sub(ms) > OVERDUE_MS) {
+    let overdue_ms = period_ms.saturating_add(DAY_MS);
+    if last_export_ms.is_none_or(|ms| now_ms.saturating_sub(ms) > overdue_ms) {
         text.push_str(" · export overdue");
     }
     if low_disk {

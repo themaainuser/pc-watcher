@@ -297,6 +297,51 @@ fn counters_persist_and_reload() {
     assert_eq!(counter(&reloaded, "etw_events_lost"), 3);
 }
 
+/// The lifetime supervisor counters must survive a reload: the first timer
+/// tick publishes the supervisor's totals with `.set`, so a FRESH supervisor
+/// would zero the loaded `watchdog_restarts`/`etw_events_lost`/
+/// `etw_buffers_lost` — `resume_supervisor` seeds them instead. This test
+/// replays run_agent + the tick publish block (timer_tick lines ~500-511)
+/// and asserts the published values never drop below the loaded ones.
+#[test]
+fn supervisor_counters_survive_reload_and_tick_publish() {
+    let (_dir, db) = store();
+    // A previous run persisted nonzero lifetime totals.
+    let previous = Arc::new(Counters::default());
+    previous.set("watchdog_restarts", 5);
+    previous.set("etw_events_lost", 11);
+    previous.set("etw_buffers_lost", 4);
+    {
+        let mut guard = db.lock().unwrap();
+        state::persist_counters(&mut guard, &previous).unwrap();
+    }
+
+    // Fresh run: load the counters and build the supervisor exactly the way
+    // run_agent does.
+    let reloaded = Arc::new(Counters::default());
+    {
+        let guard = db.lock().unwrap();
+        state::load_counters(&guard, &reloaded).unwrap();
+    }
+    let mut supervisor = state::resume_supervisor(&reloaded);
+    assert_eq!(supervisor.restarts, 5);
+    assert_eq!(supervisor.events_lost, 11);
+    assert_eq!(supervisor.buffers_lost, 4);
+
+    // Timer tick: the live session reports loss, the session ends, and the
+    // tick publishes the (cumulative) supervisor values with `.set`.
+    supervisor.on_stats(19, 7);
+    let _ = supervisor.on_exit(Ok(()), Duration::from_secs(60));
+    reloaded.set("etw_events_lost", supervisor.events_lost);
+    reloaded.set("etw_buffers_lost", supervisor.buffers_lost);
+    reloaded.set("watchdog_restarts", supervisor.restarts);
+
+    // The loaded lifetime values are not zeroed (they only grow).
+    assert_eq!(counter(&reloaded, "watchdog_restarts"), 6);
+    assert_eq!(counter(&reloaded, "etw_events_lost"), 30);
+    assert_eq!(counter(&reloaded, "etw_buffers_lost"), 11);
+}
+
 #[test]
 fn due_logic() {
     assert!(due(10, None, 5));

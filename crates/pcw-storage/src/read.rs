@@ -378,7 +378,7 @@ impl Store {
                  FROM app_sessions
                  WHERE ts_start >= ?1 AND ts_start < ?2
                    AND (?3 IS NULL OR process_name = ?3)
-                 ORDER BY ts_start ASC",
+                 ORDER BY ts_start ASC, id ASC",
             )
             .se()?;
         let mut rows = stmt
@@ -410,7 +410,7 @@ impl Store {
                  FROM window_titles
                  WHERE ts >= ?1 AND ts < ?2
                    AND (?3 IS NULL OR process_name = ?3)
-                 ORDER BY ts ASC",
+                 ORDER BY ts ASC, id ASC",
             )
             .se()?;
         let mut rows = stmt

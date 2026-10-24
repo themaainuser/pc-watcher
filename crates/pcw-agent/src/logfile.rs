@@ -1,7 +1,7 @@
 //! File logger (plan Task 12): `%LOCALAPPDATA%\PC-Watcher\agent.log`, a
 //! `log::Log` writing timestamped lines, rotated at `max_bytes` (5 MB in the
-//! agent) into `<path>.1`, replacing the old copy there (spec §9: exactly one
-//! old file is kept).
+//! agent) into `<path>.1`, replacing the old copy there (spec §5: exactly
+//! one old file is kept).
 //!
 //! Every line opens, writes and closes the file and takes its size from
 //! `metadata` first, so rotation never races an open handle: the rename runs

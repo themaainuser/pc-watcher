@@ -45,6 +45,11 @@ pub enum DashError {
     #[error("cannot bind loopback dashboard: {0}")]
     Bind(String),
     /// A storage failure while opening or reading the database.
+    ///
+    /// Currently unreachable from [`DashServer::run`]: storage failures in
+    /// the request path are answered with an error response inside the route
+    /// layer and never bubble out of `run`. Kept as a specced interface
+    /// (plan T14) for callers that want the typed conversion.
     #[error(transparent)]
     Storage(#[from] pcw_storage::StorageError),
 }

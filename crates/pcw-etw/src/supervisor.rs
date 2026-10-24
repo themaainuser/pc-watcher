@@ -6,7 +6,8 @@
 //! to a 60 s cap, reset to 1 s after a session has been up for at least 5
 //! minutes.[`Supervisor::on_stats`] adds the event loss observed by
 //! `ControlTraceW(EVENT_TRACE_CONTROL_QUERY)`, but only the loss that is new
-//! since the previous query of the same session.
+//! since the previous query of the same session. A supervisor built with
+//! [`Supervisor::with_totals`] resumes a previous run's lifetime totals.
 
 use std::time::Duration;
 
@@ -36,10 +37,21 @@ pub struct Supervisor {
 
 impl Supervisor {
     pub fn new() -> Self {
+        Self::with_totals(0, 0, 0)
+    }
+
+    /// A supervisor resuming a previous run's lifetime totals (the counters
+    /// loaded from `meta` at startup): the cumulative public counters start
+    /// from them, while the per-session baselines start at zero because the
+    /// next session runs from scratch (the same state a fresh [`Supervisor`]
+    /// would be in). Without this, the first timer tick would publish fresh
+    /// zeros over the loaded lifetime `etw_events_lost`/`etw_buffers_lost`/
+    /// `watchdog_restarts` values.
+    pub fn with_totals(restarts: u64, events_lost: u64, buffers_lost: u64) -> Self {
         Self {
-            restarts: 0,
-            events_lost: 0,
-            buffers_lost: 0,
+            restarts,
+            events_lost,
+            buffers_lost,
             backoff_secs: FIRST_WAIT_SECS,
             baseline_events_lost: 0,
             baseline_buffers_lost: 0,

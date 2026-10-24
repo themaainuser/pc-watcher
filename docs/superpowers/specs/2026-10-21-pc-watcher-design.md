@@ -342,7 +342,8 @@ running, opens the browser to it, and exits.
 ### 5.1 Agent tray menu
 
 - Open Dashboard (launches `pcw-dash.exe`)
-- Pause / Resume collection — pauses everything: network, DNS names, foreground
+- Pause / Resume collection (menu label toggles between "Pause" and
+  "Resume") — pauses everything: network, DNS names, foreground
   sessions and titles. Pausing closes the open session.
 - Export now
 - Open data folder

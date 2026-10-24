@@ -259,9 +259,21 @@ fn stage_export(db_path: &Path, dir: &Path, now_ms: u64) -> Result<Staged, Expor
     usage.flush().map_err(ExportError::Io)?;
     titles.flush().map_err(ExportError::Io)?;
 
-    // The summarized range covers the smallest ts of anything exported (0 for
-    // an empty first export) through the export instant itself.
-    let from_ms = min_ts.unwrap_or(0);
+    // The summarized range covers the smallest ts of anything exported
+    // through the export instant itself. With NO new connection rows the
+    // start falls back to the export window's start — the previous export
+    // instant (`meta.last_export`, the `now_ms` the last successful export
+    // committed with; a fresh install has no window yet and reports 0) —
+    // never 0, which would count the entire history in the overview
+    // (review N-1: an empty export must report an empty range).
+    let from_ms = match min_ts {
+        Some(ts) => ts,
+        None => store
+            .get_meta("last_export")
+            .map_err(ExportError::Storage)?
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(0),
+    };
     let filter = ConnFilter {
         from_ms,
         to_ms: now_ms,

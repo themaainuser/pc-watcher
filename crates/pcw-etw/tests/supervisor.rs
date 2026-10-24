@@ -62,3 +62,22 @@ fn loss_counts_increase_only() {
     assert_eq!(s.events_lost, 10);
     assert_eq!(s.buffers_lost, 1);
 }
+
+/// A supervisor resumed from the loaded lifetime counters keeps them as its
+/// cumulative baseline: the first `on_stats`/`on_exit` of the new run adds on
+/// top (lifetime-cumulative semantics survive a restart).
+#[test]
+fn with_totals_resumes_lifetime_cumulative_accounting() {
+    let mut s = Supervisor::with_totals(4, 3, 2);
+    assert_eq!((s.restarts, s.events_lost, s.buffers_lost), (4, 3, 2));
+    // A new session's loss is counted on top of the seeded totals.
+    s.on_stats(7, 3);
+    assert_eq!(s.events_lost, 3 + 7);
+    assert_eq!(s.buffers_lost, 2 + 3);
+    // A restart still resets the per-session baselines, not the totals.
+    let _ = s.on_exit(Ok(()), Duration::from_secs(1));
+    s.on_stats(1, 0);
+    assert_eq!(s.events_lost, 3 + 7 + 1);
+    assert_eq!(s.buffers_lost, 2 + 3);
+    assert_eq!(s.restarts, 5);
+}

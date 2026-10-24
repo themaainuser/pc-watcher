@@ -94,6 +94,20 @@ pub fn default_data_dir() -> Result<PathBuf, ConfigError> {
     data_dir_from(env::var_os("PCW_DATA_DIR"), env::var_os("LOCALAPPDATA"))
 }
 
+/// The export period in days for an `export_schedule` value (spec §7
+/// "weekly (configurable)"): `daily` ⇒ 1, `weekly` ⇒ 7, `monthly` ⇒ 30, or a
+/// plain integer number of days (≥ 1). `None` for anything else — the caller
+/// logs the failure and falls back to the weekly default.
+#[must_use]
+pub fn parse_export_schedule(value: &str) -> Option<u64> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "daily" => Some(1),
+        "weekly" => Some(7),
+        "monthly" => Some(30),
+        days => days.parse::<u64>().ok().filter(|d| *d >= 1),
+    }
+}
+
 impl Config {
     /// Create `data_dir` if missing, write the spec §8 default `config.toml`
     /// when absent, then parse it. Missing keys take defaults; unknown keys

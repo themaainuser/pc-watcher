@@ -32,7 +32,7 @@ The project folder is under the OneDrive-synced Desktop (`C:\Users\Kartik\OneDri
 - Release profile: `lto = "thin"`, `opt-level = 3`, `strip = true` (spec §11.6).
 - Both binaries start with `#![windows_subsystem = "windows"]` (spec §5).
 - Agent install: task `PC-Watcher` registered from XML with `HighestAvailable`, no battery restrictions, `ExecutionTimeLimit PT0S`, binaries copied to `%LOCALAPPDATA%\PC-Watcher\bin\` (spec §6).
-- Tray menu exactly: Open Dashboard, Pause / Resume, Export now, Open data folder, Exit (spec §5.1).
+- Tray menu exactly: Open Dashboard, Pause / Resume (menu label toggles between "Pause" and "Resume"), Export now, Open data folder, Exit (spec §5.1).
 - Meta keys exactly: `schema_version`, `last_export`, `export_wm_connections`, `export_wm_sessions`, `export_wm_titles`, `open_session`, and the six counters `etw_events_lost`, `etw_buffers_lost`, `watchdog_restarts`, `udp_capped`, `udp_skipped_low_disk`, `rows_dropped_disk_full`.
 - Footprint targets (manual smoke): agent < 40 MB RAM, < 1% average CPU idle (spec §12).
 - Conventional commits (`feat:`, `fix:`, `test:`, `chore:`, `docs:`); every task ends with a commit.

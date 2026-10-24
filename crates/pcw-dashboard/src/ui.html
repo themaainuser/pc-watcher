@@ -498,7 +498,6 @@ function showView(name) {
     return loadUsage();
   });
 }
-function showViewRef(name) { return function () { showView(name); }; }
 
 $("tab-overview").addEventListener("click", function () {
   state.app = ""; state.service = ""; showView("overview");

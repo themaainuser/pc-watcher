@@ -367,6 +367,40 @@ fn summary_json_keys_exact() {
 }
 
 #[test]
+fn empty_export_reports_the_window_not_the_whole_history() {
+    let TestEnv {
+        _dir,
+        db,
+        out,
+        writer,
+    } = setup();
+    // First export ships the one row and records `last_export` = 1_700_000_000_000.
+    seed(&writer, &[conn(1000, "1.1.1.1", "a.exe")], 1000);
+    let t1 = 1_700_000_000_000i64;
+    run_export(&db, &writer, &out, t1 as u64).unwrap();
+
+    // Second export has NO new connections: its summary must cover the
+    // export window [last_export, now2), not the whole history from ts 0
+    // (review N-1) — so the already-exported row is not re-counted.
+    let t2 = t1 + 3_600_000;
+    run_export(&db, &writer, &out, t2 as u64).unwrap();
+
+    let names = folders(&out);
+    assert_eq!(names.len(), 2);
+    let folder = out.join(&names[1]);
+    let summary: Value =
+        serde_json::from_str(&fs::read_to_string(folder.join("summary.json")).unwrap()).unwrap();
+    assert_eq!(summary["range"]["from_ms"].as_i64(), Some(t1));
+    assert_eq!(summary["range"]["to_ms"].as_i64(), Some(t2));
+    assert_eq!(summary["total_connections"].as_u64(), Some(0));
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(folder.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["from_ms"].as_i64(), Some(t1));
+    assert_eq!(manifest["to_ms"].as_i64(), Some(t2));
+    assert_eq!(manifest["connection_rows"].as_u64(), Some(0));
+}
+
+#[test]
 fn second_export_same_day_gets_suffixed_folder() {
     let TestEnv {
         _dir,
