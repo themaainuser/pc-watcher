@@ -76,7 +76,10 @@ Data lands in `%LOCALAPPDATA%\PC-Watcher\`: `data.db` (SQLite, WAL),
 ## Configuration reference
 
 `%LOCALAPPDATA%\PC-Watcher\config.toml`, created on first run with these
-defaults. Missing keys take their defaults (spec §8, transcribed exactly):
+defaults. Missing keys take their defaults (spec §8, transcribed — the one
+difference is `export_folder`: the historical spec §8 still records the
+original Drive-path default, while the shipped default is the local folder
+`D:\PC-Watcher`):
 
 ```toml
 retention_days = 10
@@ -110,18 +113,29 @@ else falls back to weekly and is logged at startup; the tray's
   there, opens the browser to it, and exits 0.
 - The UI's **Stop** button (`POST /api/shutdown`) ends `pcw-dash`; it also
   exits after 60 minutes with no requests (spec §5).
+- The **Export** pill downloads the *current view*: an Excel `.xlsx`
+  workbook (sheets `Manifest`, `Connections`, `Sessions`, `Titles`) or a
+  CSV `.zip` bundle (`manifest.json` plus one CSV per dataset), with full
+  row-level detail — every column the database holds — and a manifest
+  naming the filters, time range and row counts. Exports follow the filter
+  bar and the active drill-down: on an app drill-down they are scoped to
+  that app; on a host drill-down the export stays range-wide and the menu
+  says so.
 
-## Export to Google Drive
+## Export to disk (optional Drive sync)
 
 Exports stream from `data.db` into `<export_folder>\<date>\`
 (`connections.csv`, `app-usage.csv`, `window-titles.csv`, `summary.json`,
 `manifest.json`) with per-row watermark for incremental exports (spec §7);
 scheduled weekly or from the tray (**Export now**). Dated subfolders with a
-repeat `"-2"`, `"-3"` suffix per day.
+repeat `"-2"`, `"-3"` suffix per day. The default `export_folder` is the
+local folder `D:\PC-Watcher`; to land scheduled exports in Google Drive
+instead, point `export_folder` at a Drive-mounted folder, or at any local
+folder synced into Drive through "Folders from your computer".
 
-**Export-folder fallback (spec §7):** Google Drive for Desktop may not mount
-`G:` for an elevated process. If the elevated agent cannot see the folder,
-set `export_folder` to a local folder (for example
+**Export-folder fallback (spec §7):** an elevated process may not see a
+Drive-mounted folder. If the elevated agent cannot see the folder, set
+`export_folder` to a local folder (for example
 `%USERPROFILE%\PC-Watcher-Export`) and add that folder in Drive for Desktop
 under "Folders from your computer". When the export folder is missing, the
 export fails, is retried hourly, the tray warns, and nothing unexported is
