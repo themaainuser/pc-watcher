@@ -5,9 +5,14 @@
 //! verbatim.
 //!
 //! - `/api/export/xlsx` → one workbook, sheets in order `Manifest`,
-//!   `Connections`, `Sessions`, `Titles`.
+//!   `Connections`, `Sessions`, `Titles`. Excel caps one sheet at below
+//!   1,048,576 cells; a range that outgrows it answers 400 naming the CSV
+//!   bundle as the recovery instead of failing into the generic 503.
 //! - `/api/export/csv` → one zip with exactly `manifest.json`,
-//!   `connections.csv`, `sessions.csv`, `titles.csv`.
+//!   `connections.csv`, `sessions.csv`, `titles.csv`. Every CSV carries a
+//!   UTF-8 BOM (Excel double-click on Windows) and `'`-prefixes any field
+//!   that starts with a character Excel would treat as a formula, so
+//!   captured window titles and hostnames cannot become spreadsheet code.
 //! - Both manifests follow the brief: tool version, export timestamp with
 //!   local timezone, the range (ms + readable), every filter value (or
 //!   "any"), the row count per dataset and the source database path.
@@ -65,13 +70,23 @@ const TITLE_HEADER: [&str; 4] = ["id", "ts", "process_name", "title"];
 /// row limit.
 const FULL_RESULT_LIMIT: u32 = u32::MAX;
 
+/// Excel's per-sheet limit: 1,048,576 rows total minus the one header row
+/// we write. Past this, rust_xlsxwriter cannot add the data row.
+const XLSX_MAX_DATA_ROWS: usize = 1_048_575;
+
 /// Anything that can go wrong while building a download. The route layer
-/// answers every variant with the same retryable response, so the kind only
+/// answers every variant with the same retryable response except
+/// [`ExportError::RangeTooLarge`] (a client-side 400), so the kind only
 /// matters for test/debug clarity.
 #[derive(Debug, thiserror::Error)]
 pub enum ExportError {
     #[error(transparent)]
     Storage(#[from] StorageError),
+    /// A client-side error the route answers with 400:
+    /// the requested range cannot fit the requested format. The message
+    /// names the recovery (`use the CSV bundle`).
+    #[error("{0}")]
+    RangeTooLarge(String),
     #[error("xlsx error: {0}")]
     Xlsx(#[from] rust_xlsxwriter::XlsxError),
     #[error("zip error: {0}")]
@@ -103,12 +118,18 @@ fn manifest_entries(
     let filter_of =
         |value: Option<String>| ManifestVal::Text(value.unwrap_or_else(|| "any".into()));
     let enum_text = |value: Option<&'static str>| ManifestVal::Text(value.unwrap_or("any").into());
+    // `now_ms` is always representable; the plain-ms fallback only guards a
+    // formatting failure (never a wrong 1970 date).
+    let generated = {
+        let now = now_ms();
+        rfc3339(now).unwrap_or_else(|| now.to_string())
+    };
     vec![
         (
             "tool_version".into(),
             ManifestVal::Text(env!("CARGO_PKG_VERSION").into()),
         ),
-        ("generated_at".into(), ManifestVal::Text(rfc3339(now_ms()))),
+        ("generated_at".into(), ManifestVal::Text(generated)),
         ("from_ms".into(), ManifestVal::Num(filter.from_ms)),
         (
             "from_local".into(),
@@ -168,9 +189,28 @@ fn csv_bytes(header: &[&str], records: Vec<Vec<String>>) -> Result<Vec<u8>, Expo
     let mut writer = csv::Writer::from_writer(Vec::new());
     writer.write_record(header)?;
     for record in records {
-        writer.write_record(record)?;
+        // Every string column goes through the same guard — the values come
+        // from the OS (window titles, process paths, remote hosts), so any
+        // of them can begin with a formula character.
+        writer.write_record(record.iter().map(|field| csv_field(field)))?;
     }
-    Ok(writer.into_inner().map_err(|err| err.into_error())?)
+    let mut bytes = writer.into_inner().map_err(|err| err.into_error())?;
+    // UTF-8 BOM: without it Excel double-click on Windows decodes the file
+    // in a legacy code page and mangles Unicode window titles.
+    bytes.splice(0..0, [0xEF, 0xBB, 0xBF]);
+    Ok(bytes)
+}
+
+/// CSV formula-injection guard: a field starting with `=`, `+`, `-`, `@`,
+/// tab or CR is written as a formula by Excel on double-click open, so the
+/// CSV export prefixes it with `'` (the standard spreadsheet-neutralizer).
+/// Centralized here so every string column of every dataset gets it the
+/// same way. xlsx is unaffected — `write_string` writes inert text cells.
+fn csv_field(field: &str) -> String {
+    match field.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        true => format!("'{field}"),
+        false => field.to_string(),
+    }
 }
 
 /// The three datasets for one request: full result sets, same queries and
@@ -217,6 +257,20 @@ pub fn export_xlsx(
     db_path: &Path,
 ) -> Result<Vec<u8>, ExportError> {
     let data = fetch(store, filter)?;
+    // Excel hard-caps one sheet below this many data rows; rust_xlsxwriter
+    // would fail much later and surface as the generic retryable 503.
+    // Answer the recovery explicitly instead (CSV has no such limit).
+    for (dataset, rows) in [
+        ("Connections", data.connections.len()),
+        ("Sessions", data.sessions.len()),
+        ("Titles", data.titles.len()),
+    ] {
+        if rows > XLSX_MAX_DATA_ROWS {
+            return Err(ExportError::RangeTooLarge(format!(
+                "{dataset} has {rows} rows — range too large for one Excel sheet, use the CSV bundle"
+            )));
+        }
+    }
     let entries = manifest_entries(
         filter,
         (
@@ -368,28 +422,28 @@ pub fn today() -> String {
         .unwrap_or_default()
 }
 
-/// RFC 3339 timestamp with an explicit local offset (UTC fallback), same
-/// shape as `pcw_export`'s CSV timestamps.
-fn rfc3339(ts_ms: u64) -> String {
+/// RFC 3339 timestamp with an explicit local offset, same shape as
+/// `pcw_export`'s CSV timestamps. `None` when the timestamp is outside the
+/// representable range — no epoch fallback, so the caller decides what an
+/// out-of-range value renders as (never a wrong 1970 date).
+fn rfc3339(ts_ms: u64) -> Option<String> {
     let format = format_description!(
         "[year]-[month]-[day]T[hour]:[minute]:[second][offset_hour sign:mandatory]:[offset_minute]"
     );
-    OffsetDateTime::from_unix_timestamp_nanos(
-        i128::from(i64::try_from(ts_ms).unwrap_or(i64::MAX)) * 1_000_000,
-    )
-    .unwrap_or(OffsetDateTime::UNIX_EPOCH)
-    .to_offset(local_offset())
-    .format(&format)
-    .unwrap_or_default()
+    let ts_ms = i64::try_from(ts_ms).ok()?;
+    let time = OffsetDateTime::from_unix_timestamp_nanos(i128::from(ts_ms) * 1_000_000)
+        .ok()?
+        .to_offset(local_offset());
+    time.format(&format).ok()
 }
 
-/// A range edge as readable text. Bounds beyond the representable range
-/// (the default `to_ms = u64::MAX`) degrade to the plain number.
+/// A range edge as readable text. Bounds beyond the representable range —
+/// anything above i64::MAX, and also anything above ~year 2262, where
+/// `from_unix_timestamp_nanos`'s nanosecond arithmetic overflows — degrade
+/// to the plain number, same as the old `> i64::MAX` branch. Never a wrong
+/// 1970 epoch date.
 fn readable_ms(ts_ms: u64) -> String {
-    if ts_ms > i64::MAX as u64 {
-        return ts_ms.to_string();
-    }
-    rfc3339(ts_ms)
+    rfc3339(ts_ms).unwrap_or_else(|| ts_ms.to_string())
 }
 
 /// Machine-local offset; `time` cannot always detect it, in which case UTC

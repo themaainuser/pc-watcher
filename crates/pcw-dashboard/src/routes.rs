@@ -223,6 +223,11 @@ fn export_route(path: &str, query: &str, db_path: &Path, slot: &mut Option<Store
             body,
             &format!("pcw-export-{}.{}", crate::export::today(), extension),
         ),
+        // A client-side request error (range too large for one Excel
+        // sheet): the 400 carries the message naming the CSV-bundle
+        // recovery. Everything else stays the retryable 503 and drops the
+        // cached store so the next request retries the open.
+        Err(crate::export::ExportError::RangeTooLarge(message)) => err_resp(400, &message),
         Err(_) => {
             slot.take();
             not_ready_resp()

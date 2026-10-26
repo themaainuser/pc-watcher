@@ -179,6 +179,11 @@
   }
   .export-menu.busy .export-item { display: none; }
   .export-menu.busy .export-busy { display: flex; }
+  .export-note {
+    display: none; align-items: center; padding: 4px 11px 6px;
+    font: 500 11.5px/1.4 var(--font); color: var(--ink-3);
+  }
+  .export-note:not(.hidden) { display: flex; }
   .export-error {
     flex: 1 1 100%; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
     background: var(--danger-soft); border: 1px solid #fca5a5;
@@ -435,6 +440,7 @@
       <div id="export-menu" class="export-menu hidden" role="menu">
         <button type="button" class="export-item" role="menuitem" data-fmt="xlsx">Excel (.xlsx)</button>
         <button type="button" class="export-item" role="menuitem" data-fmt="csv">CSV bundle (.zip)</button>
+        <div id="export-note" class="export-note hidden">Range export — service filter not applied</div>
         <div class="export-busy" role="status">Preparing&hellip;</div>
       </div>
     </div>
@@ -1250,8 +1256,14 @@ async function runExport(fmt) {
   var items = exportMenu.querySelectorAll(".export-item");
   for (var i = 0; i < items.length; i++) items[i].disabled = true;
   try {
-    // The export must match the current view: same filter string as /api/*.
-    var res = await fetch(exportRoutes[fmt] + "?" + query());
+    // The export must match the current view. An app drill-down is scoped
+    // by the `app` key (the server's parse_filter ignores the route-local
+    // `name`/`key` params), overriding any filter-bar app — exactly the
+    // rows the drilled view is showing. A service drill-down has no
+    // server-side filter; the menu's note says the export stays range-wide.
+    var overrides = {};
+    if (state.app) overrides.app = state.app;
+    var res = await fetch(exportRoutes[fmt] + "?" + query(overrides));
     if (!res.ok) {
       var body = {};
       try { body = await res.json(); } catch (e) { body = {}; }
@@ -1286,6 +1298,7 @@ async function runExport(fmt) {
 exportBtn.addEventListener("click", function (event) {
   event.stopPropagation();
   if (exportMenu.classList.contains("hidden")) {
+    $("export-note").classList.toggle("hidden", !state.service);
     exportMenu.classList.remove("hidden");
     exportBtn.setAttribute("aria-expanded", "true");
   } else {

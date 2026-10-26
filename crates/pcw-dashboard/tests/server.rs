@@ -378,6 +378,43 @@ fn ui_default_dates_use_local_components() {
     );
 }
 
+// Export vs. the current view (final-review Important 1): from an app
+// drill-down the export must merge the drilled app into the query using
+// the `app` key — the server's parse_filter deliberately ignores the
+// route-local `name`/`key` params, so sending `name=` would silently
+// export the whole range while the view shows one app. A service
+// drill-down has no server-side filter; the menu must say so in words
+// instead of implying the export is scoped.
+#[test]
+fn ui_export_scopes_to_the_current_view() {
+    let ui = include_str!("../src/ui.html");
+    assert!(
+        ui.contains("if (state.app) overrides.app = state.app;"),
+        "the export must merge the drilled app with the `app` key, ui: {}",
+        snippet(ui, "overrides")
+    );
+    assert!(
+        ui.contains("query(overrides)"),
+        "the export fetch must use the overridden query"
+    );
+    assert!(
+        ui.contains("Range export — service filter not applied"),
+        "the export menu must annotate the unscoped service view"
+    );
+}
+
+/// The `haystack` lines around the first `needle` occurrence, for assertion
+/// messages without dumping the whole (font-embedded) ui.html.
+fn snippet(haystack: &str, needle: &str) -> String {
+    let at = haystack.find(needle).unwrap_or(0);
+    let start = haystack[..at].rfind('\n').map(|p| p + 1).unwrap_or(0);
+    haystack[start..]
+        .lines()
+        .take(4)
+        .collect::<Vec<&str>>()
+        .join(" ⏎ ")
+}
+
 // Export download routes (SDD 2026-10-26-pc-watcher-export, task 2).
 
 /// Raw request returning (head, body bytes) — the exports are binary files,
@@ -459,16 +496,15 @@ fn zip_text<R: std::io::Read + std::io::Seek>(
     text
 }
 
-/// First line of one entry (its CSV header row).
+/// First line of one entry (its CSV header row), with the UTF-8 BOM (if
+/// present) stripped so the fixed header assertions stay byte-exact.
 fn first_line<R: std::io::Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
     name: &str,
 ) -> String {
-    zip_text(archive, name)
-        .lines()
-        .next()
-        .expect("CSV has a header row")
-        .to_string()
+    let text = zip_text(archive, name);
+    let line = text.lines().next().expect("CSV has a header row");
+    line.strip_prefix('\u{feff}').unwrap_or(line).to_string()
 }
 
 /// The shared-strings table of an xlsx, in order (rust_xlsxwriter stores
@@ -570,7 +606,10 @@ fn export_csv_zips_exactly_the_four_files() {
         "the zip holds exactly the four brief files, got {names:?}"
     );
     // Every schema column ships, header row verbatim — `id` included
-    // (regression guard: a dropped column fails here).
+    // (regression guard: a dropped column fails here). The header lines
+    // come BOM-stripped from `first_line`; the BOM itself is asserted
+    // separately below (Excel double-click on Windows decodes a BOM-less
+    // UTF-8 file in a legacy code page and mangles Unicode titles).
     assert_eq!(
         first_line(&mut archive, "connections.csv"),
         "id,ts_first,ts_last,pid,process_name,process_path,remote_ip,remote_port,local_port,protocol,direction,hostname"
@@ -583,6 +622,29 @@ fn export_csv_zips_exactly_the_four_files() {
         first_line(&mut archive, "titles.csv"),
         "id,ts,process_name,title"
     );
+    for file in ["connections.csv", "sessions.csv", "titles.csv"] {
+        let bytes = entry_bytes(&mut archive, file);
+        assert_eq!(
+            &bytes[..3],
+            &[0xEF, 0xBB, 0xBF],
+            "{file} must start with the UTF-8 BOM"
+        );
+    }
+}
+
+/// Raw bytes of one zip entry (for magic/prefix assertions `zip_text`
+/// cannot make).
+fn entry_bytes<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    name: &str,
+) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    archive
+        .by_name(name)
+        .expect("entry exists")
+        .read_to_end(&mut bytes)
+        .expect("entry is readable");
+    bytes
 }
 
 #[test]
@@ -710,6 +772,78 @@ fn export_csv_honors_app_filter() {
             "{file} must not carry b.exe rows: {text}"
         );
     }
+}
+
+// CSV formula injection (final-review Important 2): window titles, process
+// names/paths and hostnames come from the OS, so a value may start with
+// `=`, `+`, `-`, `@`, tab or CR — Excel then runs it as a formula on
+// double-click open. The CSV writer must `'`-prefix such fields (xlsx is
+// unaffected: `write_string` writes inert text cells) and leave normal
+// values untouched.
+#[test]
+fn export_csv_prefixes_formula_leading_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("watcher.db");
+    seed_db(&path);
+    let mut store = Store::open(&path).expect("reopen seeded db");
+    let now = now_ms();
+    store
+        .apply_batch(
+            &[
+                WriteOp::Session(AppSession {
+                    ts_start_ms: now - 20_000,
+                    ts_end_ms: now - 10_000,
+                    process_name: "h.exe".into(),
+                    window_title: "=cmd|'/k calc'!A0".into(),
+                }),
+                WriteOp::Session(AppSession {
+                    ts_start_ms: now - 10_000,
+                    ts_end_ms: now,
+                    process_name: "b.exe".into(),
+                    window_title: "plain title".into(),
+                }),
+                WriteOp::Title(WindowTitle {
+                    ts_ms: now - 5_000,
+                    process_name: "h.exe".into(),
+                    title: "@evil-path".into(),
+                }),
+            ],
+            now,
+        )
+        .expect("seed formula-hostile rows");
+    drop(store);
+    let (port, _stop, _done) = spawn_run(path);
+
+    let (_head, body) = raw_request_bytes(port, "GET", "/api/export/csv");
+    let mut archive = unzip(&body);
+
+    let sessions = zip_text(&mut archive, "sessions.csv");
+    assert!(
+        sessions.contains("h.exe,'=cmd|'/k calc'!A0"),
+        "formula-leading title must be ' prefixed, sessions.csv: {sessions}"
+    );
+    assert!(
+        !sessions.contains(",=cmd"),
+        "no bare formula-leading cell may exist: {sessions}"
+    );
+    assert!(
+        sessions.contains("b.exe,plain title"),
+        "the plain seeded title ships, sessions.csv: {sessions}"
+    );
+    assert!(
+        !sessions.contains("'plain title"),
+        "normal values must not be prefixed, sessions.csv: {sessions}"
+    );
+
+    let titles = zip_text(&mut archive, "titles.csv");
+    assert!(
+        titles.contains(",h.exe,'@evil-path"),
+        "@-leading title must be ' prefixed, titles.csv: {titles}"
+    );
+    assert!(
+        !titles.contains(",@evil-path"),
+        "no bare @-leading cell may exist: {titles}"
+    );
 }
 
 #[test]
