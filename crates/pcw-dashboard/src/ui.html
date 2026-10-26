@@ -440,7 +440,7 @@
       <div id="export-menu" class="export-menu hidden" role="menu">
         <button type="button" class="export-item" role="menuitem" data-fmt="xlsx">Excel (.xlsx)</button>
         <button type="button" class="export-item" role="menuitem" data-fmt="csv">CSV bundle (.zip)</button>
-        <div id="export-note" class="export-note hidden">Range export — service filter not applied</div>
+        <div id="export-note" class="export-note hidden">Range export — host filter not applied</div>
         <div class="export-busy" role="status">Preparing&hellip;</div>
       </div>
     </div>
@@ -980,7 +980,7 @@ function peakLabel(hourly) {
 async function loadApp(name) {
   var d = await api("/api/app?" + query({ name: name, limit: LIST_LIMIT }));
   var v = clearView();
-  v.appendChild(pageHead(name, function () { showView("overview"); }));
+  v.appendChild(pageHead(name, function () { state.app = ""; state.service = ""; showView("overview"); }));
 
   var strip = card({ title: "Activity", sub: "This app across the selected range." });
   strip.appendChild(kpiStrip([
@@ -1037,7 +1037,7 @@ async function loadApp(name) {
 async function loadService(key) {
   var d = await api("/api/service?" + query({ key: key, limit: LIST_LIMIT }));
   var v = clearView();
-  v.appendChild(pageHead(key, function () { showView("overview"); }));
+  v.appendChild(pageHead(key, function () { state.app = ""; state.service = ""; showView("overview"); }));
 
   // Which apps talked to it: tallied from the capped rows the server sent.
   var perApp = {}, order = [];
@@ -1256,13 +1256,15 @@ async function runExport(fmt) {
   var items = exportMenu.querySelectorAll(".export-item");
   for (var i = 0; i < items.length; i++) items[i].disabled = true;
   try {
-    // The export must match the current view. An app drill-down is scoped
-    // by the `app` key (the server's parse_filter ignores the route-local
-    // `name`/`key` params), overriding any filter-bar app — exactly the
-    // rows the drilled view is showing. A service drill-down has no
-    // server-side filter; the menu's note says the export stays range-wide.
+    // The export must match the current view. Only the app drill-down view
+    // scopes the export: merge the drilled app with the `app` key (the
+    // server's parse_filter ignores the route-local `name`/`key` params),
+    // overriding any filter-bar app — gated on state.view, not state, so
+    // leaving the drill-down (tab, Back, nav) can never leak a stale scope.
+    // A service (host) drill-down has no server-side filter; the menu's
+    // note — shown only on that view — says the export stays range-wide.
     var overrides = {};
-    if (state.app) overrides.app = state.app;
+    if (state.view === "app" && state.app) overrides.app = state.app;
     var res = await fetch(exportRoutes[fmt] + "?" + query(overrides));
     if (!res.ok) {
       var body = {};
@@ -1298,7 +1300,10 @@ async function runExport(fmt) {
 exportBtn.addEventListener("click", function (event) {
   event.stopPropagation();
   if (exportMenu.classList.contains("hidden")) {
-    $("export-note").classList.toggle("hidden", !state.service);
+    $("export-note").classList.toggle(
+      "hidden",
+      state.view !== "service" || !state.service
+    );
     exportMenu.classList.remove("hidden");
     exportBtn.setAttribute("aria-expanded", "true");
   } else {

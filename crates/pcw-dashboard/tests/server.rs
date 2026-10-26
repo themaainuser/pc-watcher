@@ -378,28 +378,49 @@ fn ui_default_dates_use_local_components() {
     );
 }
 
-// Export vs. the current view (final-review Important 1): from an app
-// drill-down the export must merge the drilled app into the query using
-// the `app` key — the server's parse_filter deliberately ignores the
-// route-local `name`/`key` params, so sending `name=` would silently
-// export the whole range while the view shows one app. A service
-// drill-down has no server-side filter; the menu must say so in words
-// instead of implying the export is scoped.
+// Export vs. the current view (final-review Important 1, re-review fix):
+// only the app drill-down view may scope the export. The merge must be
+// gated on the CURRENT VIEW (state.view), not on state presence — the
+// re-review found a state-only merge silently app-scoping the overview
+// export after "Back to Overview". The host drill-down has no server-side
+// filter; the menu note must appear only on that view and must say
+// "host" (the view is labelled "Top hosts"/"Host activity"). Primacy
+// hygiene: both drill-down Back handlers clear state.app/state.service.
 #[test]
 fn ui_export_scopes_to_the_current_view() {
     let ui = include_str!("../src/ui.html");
     assert!(
-        ui.contains("if (state.app) overrides.app = state.app;"),
-        "the export must merge the drilled app with the `app` key, ui: {}",
+        ui.contains("if (state.view === \"app\" && state.app) overrides.app = state.app;"),
+        "the app merge must be gated on the current view, ui: {}",
         snippet(ui, "overrides")
+    );
+    assert!(
+        !ui.contains("if (state.app) overrides.app = state.app;"),
+        "the state-only (ungated) merge must be gone"
     );
     assert!(
         ui.contains("query(overrides)"),
         "the export fetch must use the overridden query"
     );
     assert!(
-        ui.contains("Range export — service filter not applied"),
-        "the export menu must annotate the unscoped service view"
+        ui.contains("Range export — host filter not applied"),
+        "the export menu must annotate the unscoped host view"
+    );
+    assert!(
+        !ui.contains("service filter not applied"),
+        "the annotation must say host, matching the README and view labels"
+    );
+    assert!(
+        ui.contains("state.view !== \"service\" || !state.service"),
+        "the note must be gated on the current service view, not state alone"
+    );
+    assert_eq!(
+        ui.matches(
+            "function () { state.app = \"\"; state.service = \"\"; showView(\"overview\"); }"
+        )
+        .count(),
+        2,
+        "both Back handlers (app + host drill-down) must clear the drill-down state"
     );
 }
 
