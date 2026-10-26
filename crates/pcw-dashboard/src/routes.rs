@@ -28,11 +28,13 @@ const NOT_READY_BODY: &str = r#"{"error": "no data yet — is pcw-agent running?
 const DEFAULT_LIMIT: u32 = 100;
 const MAX_LIMIT: u32 = 1_000;
 
-/// One complete HTTP response: bytes chosen by the route.
+/// One complete HTTP response: bytes chosen by the route. Downloads carry
+/// an extra `Content-Disposition` attachment header.
 pub struct Resp {
     pub status: u16,
     pub content_type: &'static str,
     pub body: Vec<u8>,
+    pub content_disposition: Option<String>,
 }
 
 fn json_resp(status: u16, body: Vec<u8>) -> Resp {
@@ -40,6 +42,18 @@ fn json_resp(status: u16, body: Vec<u8>) -> Resp {
         status,
         content_type: "application/json",
         body,
+        content_disposition: None,
+    }
+}
+
+/// A file download: 200 bytes with their MIME type and the exact attachment
+/// header the export routes mandate.
+fn file_resp(content_type: &'static str, body: Vec<u8>, filename: &str) -> Resp {
+    Resp {
+        status: 200,
+        content_type,
+        body,
+        content_disposition: Some(format!("attachment; filename={filename}")),
     }
 }
 
@@ -91,6 +105,7 @@ fn not_ready_resp() -> Resp {
         status: 503,
         content_type: "application/json",
         body: NOT_READY_BODY.as_bytes().to_vec(),
+        content_disposition: None,
     }
 }
 
@@ -100,6 +115,7 @@ fn ui_resp() -> Resp {
         status: 200,
         content_type: "text/html; charset=utf-8",
         body: UI_HTML.as_bytes().to_vec(),
+        content_disposition: None,
     }
 }
 
@@ -126,6 +142,9 @@ pub fn handle(
         }
         (Method::Get, "/api/overview" | "/api/app" | "/api/service" | "/api/usage") => {
             data_route(path, query, db_path, store)
+        }
+        (Method::Get, "/api/export/xlsx" | "/api/export/csv") => {
+            export_route(path, query, db_path, store)
         }
         // Unknown paths and wrong methods on known paths both 404.
         _ => err_resp(404, "not found"),
@@ -171,6 +190,44 @@ fn open_store<'a>(db_path: &Path, slot: &'a mut Option<Store>) -> Option<&'a Sto
         *slot = Store::open_readonly(db_path).ok();
     }
     slot.as_ref()
+}
+
+/// The two download routes: filter parsing, 400 errors and the lazy 503
+/// store handling are identical to [`data_route`]; only the body differs —
+/// a built file instead of JSON. Like `data_route`, a failed build drops
+/// the cached store so the next request retries the open.
+fn export_route(path: &str, query: &str, db_path: &Path, slot: &mut Option<Store>) -> Resp {
+    let filter = match parse_filter(query) {
+        Ok(filter) => filter,
+        Err(msg) => return err_resp(400, &format!("invalid filter: {msg}")),
+    };
+    let Some(store) = open_store(db_path, slot) else {
+        return not_ready_resp();
+    };
+
+    let extension = if path.ends_with("xlsx") {
+        "xlsx"
+    } else {
+        "zip"
+    };
+    let (content_type, built) = if extension == "xlsx" {
+        let built = crate::export::export_xlsx(store, &filter, db_path);
+        (crate::export::XLSX_CONTENT_TYPE, built)
+    } else {
+        let built = crate::export::export_zip(store, &filter, db_path);
+        (crate::export::ZIP_CONTENT_TYPE, built)
+    };
+    match built {
+        Ok(body) => file_resp(
+            content_type,
+            body,
+            &format!("pcw-export-{}.{}", crate::export::today(), extension),
+        ),
+        Err(_) => {
+            slot.take();
+            not_ready_resp()
+        }
+    }
 }
 
 fn route_overview(store: &Store, filter: &ConnFilter) -> Result<Resp, pcw_storage::StorageError> {

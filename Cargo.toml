@@ -22,6 +22,8 @@ tray-icon = "0.26.1"
 tao = "0.37.1"
 time = { version = "0.3.55", features = ["local-offset", "formatting", "macros"] }
 log = "0.4.34"
+rust_xlsxwriter = "0.96"      # xlsx export builder (dashboard download routes)
+zip = { version = "2.6", default-features = false, features = ["deflate"] }
 tempfile = "3.27.0"           # dev-dependency only
 
 [profile.release]

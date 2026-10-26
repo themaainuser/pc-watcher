@@ -27,6 +27,7 @@ use std::time::Duration;
 use pcw_storage::Store;
 use thiserror::Error;
 
+pub mod export;
 pub mod routes;
 
 pub use routes::Resp;
@@ -136,6 +137,13 @@ fn handle_one(
     let mut response = tiny_http::Response::from_data(resp.body).with_status_code(resp.status);
     if let Ok(header) = tiny_http::Header::from_bytes(&b"Content-Type"[..], resp.content_type) {
         response.add_header(header);
+    }
+    if let Some(disposition) = &resp.content_disposition {
+        if let Ok(header) =
+            tiny_http::Header::from_bytes(&b"Content-Disposition"[..], disposition.as_bytes())
+        {
+            response.add_header(header);
+        }
     }
     let _ = request.respond(response);
 }

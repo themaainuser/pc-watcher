@@ -338,3 +338,328 @@ fn ui_default_dates_use_local_components() {
         "ui.html must construct the default dates from local date components"
     );
 }
+
+// Export download routes (SDD 2026-10-26-pc-watcher-export, task 2).
+
+/// Raw request returning (head, body bytes) — the exports are binary files,
+/// so unlike [`raw_request`] the body must survive as bytes.
+fn raw_request_bytes(port: u16, method: &str, target: &str) -> (String, Vec<u8>) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect to dashboard");
+    let request =
+        format!("{method} {target} HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n");
+    stream.write_all(request.as_bytes()).expect("send request");
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).expect("read response");
+    let split = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("HTTP head/body separator");
+    let head = String::from_utf8_lossy(&raw[..split]).into_owned();
+    (head, raw[split + 4..].to_vec())
+}
+
+/// The export response head must carry the exact attachment header with a
+/// `pcw-export-<YYYY-MM-DD>.<ext>` filename, and the Content-Type the route
+/// promises. Returns the extracted filename date (`YYYY-MM-DD`).
+fn assert_download_head(head: &str, content_type: &str, ext: &str) -> String {
+    assert_eq!(status_code(head), 200);
+    let lowered = head.to_ascii_lowercase();
+    assert!(
+        lowered.contains(content_type),
+        "content-type must be {content_type}, head: {head}"
+    );
+    let expected = "content-disposition: attachment; filename=pcw-export-";
+    let Some(date) = lowered
+        .split(expected)
+        .nth(1)
+        .map(|rest| rest[..10].to_string())
+    else {
+        panic!("missing Content-Disposition head: {head}");
+    };
+    assert_eq!(
+        lowered.matches("content-disposition:").count(),
+        1,
+        "exactly one content-disposition line, head: {head}"
+    );
+    assert!(
+        lowered.contains(&format!(
+            "content-disposition: attachment; filename=pcw-export-{date}.{ext}"
+        )),
+        "head: {head}"
+    );
+    assert!(
+        date.bytes().enumerate().all(|(i, b)| {
+            if matches!(i, 4 | 7) {
+                b == b'-'
+            } else {
+                b.is_ascii_digit()
+            }
+        }),
+        "filename date must be YYYY-MM-DD, got {date:?}"
+    );
+    date
+}
+
+/// The zip container of either export (xlsx is zip too), parsed in memory.
+fn unzip(body: &[u8]) -> zip::ZipArchive<std::io::Cursor<&[u8]>> {
+    assert_eq!(&body[..2], b"PK", "zip container magic missing");
+    zip::ZipArchive::new(std::io::Cursor::new(body)).expect("valid zip container")
+}
+
+/// Text of one entry of a parsed zip archive.
+fn zip_text<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    name: &str,
+) -> String {
+    let mut text = String::new();
+    archive
+        .by_name(name)
+        .expect("entry exists")
+        .read_to_string(&mut text)
+        .expect("entry is UTF-8 text");
+    text
+}
+
+#[test]
+fn export_xlsx_serves_workbook_with_four_sheets() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("watcher.db");
+    seed_db(&path);
+    let (port, _stop, _done) = spawn_run(path);
+
+    let (head, body) = raw_request_bytes(port, "GET", "/api/export/xlsx");
+    assert_download_head(
+        &head,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "xlsx",
+    );
+    let mut archive = unzip(&body);
+    // The workbook parses and carries the four sheets in the brief's order.
+    let workbook_xml = zip_text(&mut archive, "xl/workbook.xml");
+    let mut order = 0;
+    for name in ["Manifest", "Connections", "Sessions", "Titles"] {
+        let at = workbook_xml
+            .find(&format!("name=\"{name}\""))
+            .unwrap_or_else(|| panic!("sheet {name} missing from workbook.xml: {workbook_xml}"));
+        assert!(at >= order, "sheets out of order around {name}");
+        order = at;
+    }
+}
+
+#[test]
+fn export_csv_zips_exactly_the_four_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("watcher.db");
+    seed_db(&path);
+    let (port, _stop, _done) = spawn_run(path);
+
+    let (head, body) = raw_request_bytes(port, "GET", "/api/export/csv");
+    assert_download_head(&head, "application/zip", "zip");
+    let archive = unzip(&body);
+    let mut names: Vec<&str> = archive.file_names().collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        [
+            "connections.csv",
+            "manifest.json",
+            "sessions.csv",
+            "titles.csv"
+        ],
+        "the zip holds exactly the four brief files, got {names:?}"
+    );
+}
+
+#[test]
+fn export_manifest_carries_version_range_filters_counts_and_db() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("watcher.db");
+    seed_db(&path);
+    let (port, _stop, _done) = spawn_run(path);
+
+    let (_head, body) = raw_request_bytes(port, "GET", "/api/export/csv");
+    let mut archive = unzip(&body);
+    let manifest: serde_json::Value =
+        serde_json::from_str(&zip_text(&mut archive, "manifest.json")).expect("manifest.json");
+    let obj = manifest.as_object().unwrap();
+
+    assert_eq!(
+        manifest["tool_version"].as_str(),
+        Some(env!("CARGO_PKG_VERSION"))
+    );
+    // Export timestamp with a local timezone: RFC 3339-like, offset-annotated.
+    let generated = manifest["generated_at"].as_str().expect("generated_at");
+    assert!(
+        generated.len() > 20 && generated.as_bytes()[4] == b'-',
+        "generated_at: {generated:?}"
+    );
+
+    assert_eq!(
+        manifest["from_ms"].as_u64(),
+        Some(0),
+        "default filter starts at 0"
+    );
+    assert!(manifest["to_ms"].is_u64(), "to_ms present");
+    assert!(manifest["from_local"].is_string(), "readable from present");
+    assert!(manifest["to_local"].is_string(), "readable to present");
+
+    for key in [
+        "filter_app",
+        "filter_protocol",
+        "filter_port",
+        "filter_direction",
+    ] {
+        assert_eq!(manifest[key].as_str(), Some("any"), "unfiltered {key}");
+    }
+    assert_eq!(manifest["rows_connections"].as_u64(), Some(2));
+    assert_eq!(manifest["rows_sessions"].as_u64(), Some(1));
+    assert_eq!(manifest["rows_titles"].as_u64(), Some(1));
+    assert!(
+        manifest["source_db"]
+            .as_str()
+            .is_some_and(|db| db.ends_with("watcher.db")),
+        "source db path: {obj:?}"
+    );
+
+    // Row-level detail: the hostname join ships like in the JSON endpoints.
+    let connections = zip_text(&mut archive, "connections.csv");
+    assert!(
+        connections.contains("example.test"),
+        "resolved hostname must ship, connections.csv: {connections}"
+    );
+}
+
+#[test]
+fn export_csv_honors_app_filter() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("watcher.db");
+    seed_db(&path);
+    // A second app the filter must exclude from every dataset.
+    let mut store = Store::open(&path).expect("reopen seeded db");
+    let now = now_ms();
+    store
+        .apply_batch(
+            &[
+                WriteOp::Connection(ConnectionEvent {
+                    ts_ms: now,
+                    kind: EventKind::Close,
+                    pid: 2001,
+                    process_name: "b.exe".into(),
+                    process_path: r"C:\tests\b.exe".into(),
+                    remote_ip: "255.255.255.250".into(),
+                    remote_port: 8080,
+                    local_port: 52001,
+                    protocol: Protocol::Tcp,
+                    direction: Direction::Out,
+                }),
+                WriteOp::Session(AppSession {
+                    ts_start_ms: now - 10_000,
+                    ts_end_ms: now,
+                    process_name: "b.exe".into(),
+                    window_title: "b-window".into(),
+                }),
+                WriteOp::Title(WindowTitle {
+                    ts_ms: now - 5_000,
+                    process_name: "b.exe".into(),
+                    title: "b-title".into(),
+                }),
+            ],
+            now,
+        )
+        .expect("seed b.exe rows");
+    drop(store);
+    let (port, _stop, _done) = spawn_run(path);
+
+    let (_head, body) = raw_request_bytes(port, "GET", "/api/export/csv?app=a.exe");
+    let mut archive = unzip(&body);
+    let manifest: serde_json::Value =
+        serde_json::from_str(&zip_text(&mut archive, "manifest.json")).unwrap();
+    assert_eq!(manifest["filter_app"].as_str(), Some("a.exe"));
+    assert_eq!(
+        manifest["rows_connections"].as_u64(),
+        Some(2),
+        "b.exe excluded"
+    );
+    assert_eq!(manifest["rows_sessions"].as_u64(), Some(1));
+    assert_eq!(manifest["rows_titles"].as_u64(), Some(1));
+
+    for (file, b_marker) in [
+        ("connections.csv", "b.exe"),
+        ("sessions.csv", "b-window"),
+        ("titles.csv", "b-title"),
+    ] {
+        let text = zip_text(&mut archive, file);
+        assert!(text.contains("a.exe"), "{file} keeps the filtered app");
+        assert!(
+            !text.contains(b_marker),
+            "{file} must not carry b.exe rows: {text}"
+        );
+    }
+}
+
+#[test]
+fn export_empty_range_returns_valid_files_with_zero_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("watcher.db");
+    seed_db(&path);
+    let (port, _stop, _done) = spawn_run(path);
+
+    let from = now_ms() + 7 * 86_400_000; // a week ahead: nothing was seeded there
+    let to = from + 3_600_000;
+
+    let (_head, body) =
+        raw_request_bytes(port, "GET", &format!("/api/export/csv?from={from}&to={to}"));
+    let mut archive = unzip(&body);
+    let manifest: serde_json::Value =
+        serde_json::from_str(&zip_text(&mut archive, "manifest.json")).unwrap();
+    assert_eq!(manifest["from_ms"].as_u64(), Some(from));
+    assert_eq!(manifest["rows_connections"].as_u64(), Some(0));
+    assert_eq!(manifest["rows_sessions"].as_u64(), Some(0));
+    assert_eq!(manifest["rows_titles"].as_u64(), Some(0));
+    for file in ["connections.csv", "sessions.csv", "titles.csv"] {
+        let text = zip_text(&mut archive, file);
+        assert_eq!(
+            text.lines().count(),
+            1,
+            "empty range keeps only the header row in {file}: {text:?}"
+        );
+        assert!(!text.contains("a.exe"), "{file} must carry no seeded rows");
+    }
+
+    let (head, body) = raw_request_bytes(
+        port,
+        "GET",
+        &format!("/api/export/xlsx?from={from}&to={to}"),
+    );
+    assert_download_head(
+        &head,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "xlsx",
+    );
+    assert_eq!(&body[..2], b"PK", "empty xlsx is still a valid container");
+}
+
+#[test]
+fn export_bad_filter_is_400() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("watcher.db");
+    seed_db(&path);
+    let (port, _stop, _done) = spawn_run(path);
+
+    for (route, message) in [
+        ("/api/export/xlsx?protocol=xyz", "protocol"),
+        ("/api/export/csv?port=99999", "port"),
+        ("/api/export/xlsx?from=nope", "from"),
+    ] {
+        let (head, body) = raw_request(port, "GET", route);
+        assert_eq!(
+            status_code(&head),
+            400,
+            "{route} must be a 400, head: {head}"
+        );
+        assert!(
+            body.to_ascii_lowercase().contains(message),
+            "400 body must name the bad parameter, body: {body}"
+        );
+    }
+}
