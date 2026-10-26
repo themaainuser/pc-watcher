@@ -420,6 +420,53 @@ fn zip_text<R: std::io::Read + std::io::Seek>(
     text
 }
 
+/// First line of one entry (its CSV header row).
+fn first_line<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    name: &str,
+) -> String {
+    zip_text(archive, name)
+        .lines()
+        .next()
+        .expect("CSV has a header row")
+        .to_string()
+}
+
+/// The shared-strings table of an xlsx, in order (rust_xlsxwriter stores
+/// cell strings there; the `xml:space` variant is normalized first).
+fn shared_strings<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> Vec<String> {
+    let xml =
+        zip_text(archive, "xl/sharedStrings.xml").replace("<t xml:space=\"preserve\">", "<t>");
+    xml.split("<t>")
+        .skip(1)
+        .map(|rest| rest[..rest.find("</t>").expect("closed string")].to_string())
+        .collect()
+}
+
+/// The first `count` cell values of one worksheet, resolved through the
+/// shared-strings table (xlsx stores strings as shared-string indices);
+/// row 1 comes first in the sheet XML, so these are the header cells.
+fn first_cells<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    sheet: &str,
+    shared: &[String],
+    count: usize,
+) -> Vec<String> {
+    let xml = zip_text(archive, sheet);
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while out.len() < count {
+        let start = xml[pos..].find("<v>").expect("cell value") + pos + 3;
+        let end = xml[start..].find("</v>").expect("cell value end") + start;
+        let index: usize = xml[start..end].parse().expect("shared-string index");
+        out.push(shared[index].clone());
+        pos = end;
+    }
+    out
+}
+
 #[test]
 fn export_xlsx_serves_workbook_with_four_sheets() {
     let dir = tempfile::tempdir().unwrap();
@@ -444,6 +491,21 @@ fn export_xlsx_serves_workbook_with_four_sheets() {
         assert!(at >= order, "sheets out of order around {name}");
         order = at;
     }
+    // Sheet headers carry every schema column, `id` included (sheets are
+    // written in creation order: sheet1=Manifest … sheet4=Titles).
+    let shared = shared_strings(&mut archive);
+    assert_eq!(
+        first_cells(&mut archive, "xl/worksheets/sheet2.xml", &shared, 2),
+        ["id", "ts_first"]
+    );
+    assert_eq!(
+        first_cells(&mut archive, "xl/worksheets/sheet3.xml", &shared, 2),
+        ["id", "ts_start"]
+    );
+    assert_eq!(
+        first_cells(&mut archive, "xl/worksheets/sheet4.xml", &shared, 2),
+        ["id", "ts"]
+    );
 }
 
 #[test]
@@ -455,7 +517,7 @@ fn export_csv_zips_exactly_the_four_files() {
 
     let (head, body) = raw_request_bytes(port, "GET", "/api/export/csv");
     assert_download_head(&head, "application/zip", "zip");
-    let archive = unzip(&body);
+    let mut archive = unzip(&body);
     let mut names: Vec<&str> = archive.file_names().collect();
     names.sort_unstable();
     assert_eq!(
@@ -467,6 +529,20 @@ fn export_csv_zips_exactly_the_four_files() {
             "titles.csv"
         ],
         "the zip holds exactly the four brief files, got {names:?}"
+    );
+    // Every schema column ships, header row verbatim — `id` included
+    // (regression guard: a dropped column fails here).
+    assert_eq!(
+        first_line(&mut archive, "connections.csv"),
+        "id,ts_first,ts_last,pid,process_name,process_path,remote_ip,remote_port,local_port,protocol,direction,hostname"
+    );
+    assert_eq!(
+        first_line(&mut archive, "sessions.csv"),
+        "id,ts_start,ts_end,process_name,window_title"
+    );
+    assert_eq!(
+        first_line(&mut archive, "titles.csv"),
+        "id,ts,process_name,title"
     );
 }
 

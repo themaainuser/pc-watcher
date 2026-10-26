@@ -7,5 +7,7 @@ mod read;
 mod schema;
 mod write;
 
-pub use read::{ConnFilter, ConnectionRow, DestinationRow, OverviewSummary, UsageSummary};
+pub use read::{
+    ConnFilter, ConnectionRow, DestinationRow, OverviewSummary, SessionRow, TitleRow, UsageSummary,
+};
 pub use write::{SharedStore, StorageError, Store, WriteOp};

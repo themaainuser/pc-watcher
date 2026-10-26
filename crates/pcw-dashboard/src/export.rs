@@ -11,8 +11,10 @@
 //! - Both manifests follow the brief: tool version, export timestamp with
 //!   local timezone, the range (ms + readable), every filter value (or
 //!   "any"), the row count per dataset and the source database path.
-//! - Columns follow the actual `pcw-storage` schema: everything the reused
-//!   queries return ships (`connections` includes the `hostname` LEFT JOIN).
+//! - Columns follow the actual `pcw-storage` schema: every column each
+//!   table holds ships — `connections` includes the `hostname` LEFT JOIN,
+//!   sessions/titles go through `session_rows`/`title_rows` so their `id`
+//!   ships too.
 //!
 //! The plan explicitly accepts holding a full-range export (~160k rows,
 //! tens of MB) in memory for this local single-user tool; there is
@@ -28,8 +30,8 @@ use zip::CompressionMethod;
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
-use pcw_storage::{ConnFilter, ConnectionRow, StorageError, Store};
-use pcw_types::{AppSession, Direction, Protocol, WindowTitle};
+use pcw_storage::{ConnFilter, ConnectionRow, SessionRow, StorageError, Store, TitleRow};
+use pcw_types::{Direction, Protocol};
 
 /// Content types of the two download routes.
 pub const XLSX_CONTENT_TYPE: &str =
@@ -53,10 +55,10 @@ const CONNECTION_HEADER: [&str; 12] = [
     "direction",
     "hostname",
 ];
-/// The whole `app_sessions` schema as [`pcw_types::AppSession`] carries it.
-const SESSION_HEADER: [&str; 4] = ["ts_start", "ts_end", "process_name", "window_title"];
-/// The whole `window_titles` schema as [`pcw_types::WindowTitle`] carries it.
-const TITLE_HEADER: [&str; 3] = ["ts", "process_name", "title"];
+/// Every schema column of `app_sessions` in schema order ([`SessionRow`]).
+const SESSION_HEADER: [&str; 5] = ["id", "ts_start", "ts_end", "process_name", "window_title"];
+/// Every schema column of `window_titles` in schema order ([`TitleRow`]).
+const TITLE_HEADER: [&str; 4] = ["id", "ts", "process_name", "title"];
 
 /// The bounded connection list query is shared with the JSON endpoints;
 /// "full range" means passing the largest possible cap instead of the UI's
@@ -171,20 +173,20 @@ fn csv_bytes(header: &[&str], records: Vec<Vec<String>>) -> Result<Vec<u8>, Expo
     Ok(writer.into_inner().map_err(|err| err.into_error())?)
 }
 
-/// The three datasets for one request: full result sets, same queries as
-/// the JSON endpoints (`/api/app`'s connection list, `/api/usage`'s
-/// sessions + titles).
+/// The three datasets for one request: full result sets, same queries and
+/// filters as the JSON endpoints' ranges — connections also carries the
+/// hostname join, sessions/titles their whole schema (including `id`).
 struct ExportData {
     connections: Vec<ConnectionRow>,
-    sessions: Vec<AppSession>,
-    titles: Vec<WindowTitle>,
+    sessions: Vec<SessionRow>,
+    titles: Vec<TitleRow>,
 }
 
 fn fetch(store: &Store, filter: &ConnFilter) -> Result<ExportData, StorageError> {
     Ok(ExportData {
         connections: store.connections(filter, FULL_RESULT_LIMIT)?,
-        sessions: store.sessions(filter.from_ms, filter.to_ms, filter.app.as_deref())?,
-        titles: store.titles(filter.from_ms, filter.to_ms, filter.app.as_deref())?,
+        sessions: store.session_rows(filter.from_ms, filter.to_ms, filter.app.as_deref())?,
+        titles: store.title_rows(filter.from_ms, filter.to_ms, filter.app.as_deref())?,
     })
 }
 
@@ -269,10 +271,11 @@ pub fn export_xlsx(
     sessions.write_row_with_format(0, 0, SESSION_HEADER, &bold)?;
     for (r, session) in data.sessions.iter().enumerate() {
         let row = (r + 1) as u32;
-        sessions.write_number(row, 0, session.ts_start_ms as f64)?;
-        sessions.write_number(row, 1, session.ts_end_ms as f64)?;
-        sessions.write_string(row, 2, &session.process_name)?;
-        sessions.write_string(row, 3, &session.window_title)?;
+        sessions.write_number(row, 0, session.id as f64)?;
+        sessions.write_number(row, 1, session.ts_start_ms as f64)?;
+        sessions.write_number(row, 2, session.ts_end_ms as f64)?;
+        sessions.write_string(row, 3, &session.process_name)?;
+        sessions.write_string(row, 4, &session.window_title)?;
     }
 
     let titles = workbook.add_worksheet();
@@ -280,9 +283,10 @@ pub fn export_xlsx(
     titles.write_row_with_format(0, 0, TITLE_HEADER, &bold)?;
     for (r, title) in data.titles.iter().enumerate() {
         let row = (r + 1) as u32;
-        titles.write_number(row, 0, title.ts_ms as f64)?;
-        titles.write_string(row, 1, &title.process_name)?;
-        titles.write_string(row, 2, &title.title)?;
+        titles.write_number(row, 0, title.id as f64)?;
+        titles.write_number(row, 1, title.ts_ms as f64)?;
+        titles.write_string(row, 2, &title.process_name)?;
+        titles.write_string(row, 3, &title.title)?;
     }
 
     Ok(workbook.save_to_buffer()?)
@@ -316,6 +320,7 @@ pub fn export_zip(
             .iter()
             .map(|s| {
                 vec![
+                    s.id.to_string(),
                     s.ts_start_ms.to_string(),
                     s.ts_end_ms.to_string(),
                     s.process_name.clone(),
@@ -328,7 +333,14 @@ pub fn export_zip(
         &TITLE_HEADER,
         data.titles
             .iter()
-            .map(|t| vec![t.ts_ms.to_string(), t.process_name.clone(), t.title.clone()])
+            .map(|t| {
+                vec![
+                    t.id.to_string(),
+                    t.ts_ms.to_string(),
+                    t.process_name.clone(),
+                    t.title.clone(),
+                ]
+            })
             .collect(),
     )?;
 

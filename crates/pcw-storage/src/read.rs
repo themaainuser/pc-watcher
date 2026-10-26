@@ -82,11 +82,32 @@ pub struct DestinationRow {
     pub ts_last_ms: u64,
 }
 
-/// Session count and total foreground time (whole seconds) of one app.
+/// One session count and total foreground time (whole seconds) of one app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct UsageSummary {
     pub session_count: u64,
     pub total_secs: u64,
+}
+
+/// Every schema column of `app_sessions` as one row (like [`ConnectionRow`]
+/// for `connections`): the export paths ship whole rows, including `id`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionRow {
+    pub id: i64,
+    pub ts_start_ms: u64,
+    pub ts_end_ms: u64,
+    pub process_name: String,
+    pub window_title: String,
+}
+
+/// Every schema column of `window_titles` as one row (like [`ConnectionRow`]
+/// for `connections`): the export paths ship whole rows, including `id`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TitleRow {
+    pub id: i64,
+    pub ts_ms: u64,
+    pub process_name: String,
+    pub title: String,
 }
 
 /// Filtered-connection predicate shared by all connection queries; binds six
@@ -422,6 +443,74 @@ impl Store {
                 ts_ms: row.get::<_, i64>(0).se()? as u64,
                 process_name: row.get(1).se()?,
                 title: row.get(2).se()?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Every schema column of `app_sessions`, including `id`, in
+    /// `[from_ms, to_ms)` by `ts_start`, oldest first — the whole-row read
+    /// the export paths use ([`Store::sessions`] stays the dashboard DTO).
+    pub fn session_rows(
+        &self,
+        from_ms: u64,
+        to_ms: u64,
+        app: Option<&str>,
+    ) -> Result<Vec<SessionRow>, StorageError> {
+        let mut stmt = self
+            .conn()
+            .prepare(
+                "SELECT id, ts_start, ts_end, process_name, window_title
+                 FROM app_sessions
+                 WHERE ts_start >= ?1 AND ts_start < ?2
+                   AND (?3 IS NULL OR process_name = ?3)
+                 ORDER BY ts_start ASC, id ASC",
+            )
+            .se()?;
+        let mut rows = stmt
+            .query(params![ts_bound(from_ms), ts_bound(to_ms), app])
+            .se()?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().se()? {
+            out.push(SessionRow {
+                id: row.get(0).se()?,
+                ts_start_ms: row.get::<_, i64>(1).se()? as u64,
+                ts_end_ms: row.get::<_, i64>(2).se()? as u64,
+                process_name: row.get(3).se()?,
+                window_title: row.get(4).se()?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Every schema column of `window_titles`, including `id`, in
+    /// `[from_ms, to_ms)` by `ts`, oldest first — like [`Store::session_rows`].
+    pub fn title_rows(
+        &self,
+        from_ms: u64,
+        to_ms: u64,
+        app: Option<&str>,
+    ) -> Result<Vec<TitleRow>, StorageError> {
+        let mut stmt = self
+            .conn()
+            .prepare(
+                "SELECT id, ts, process_name, title
+                 FROM window_titles
+                 WHERE ts >= ?1 AND ts < ?2
+                   AND (?3 IS NULL OR process_name = ?3)
+                 ORDER BY ts ASC, id ASC",
+            )
+            .se()?;
+        let mut rows = stmt
+            .query(params![ts_bound(from_ms), ts_bound(to_ms), app])
+            .se()?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().se()? {
+            out.push(TitleRow {
+                id: row.get(0).se()?,
+                ts_ms: row.get::<_, i64>(1).se()? as u64,
+                process_name: row.get(2).se()?,
+                title: row.get(3).se()?,
             });
         }
         Ok(out)
