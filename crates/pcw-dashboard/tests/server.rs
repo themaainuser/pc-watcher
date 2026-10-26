@@ -333,6 +333,28 @@ fn ui_pins_export_paths() {
     );
 }
 
+// The object URL must never be revoked synchronously on the download path:
+// Chrome keeps copying the blob into the download after `a.click()`, and an
+// instant revoke can abort that copy mid-spool (live round on 2026-10-26
+// produced a truncated 820-byte zip). The revoke must go through the
+// deferred timer so the URL is still always released.
+#[test]
+fn ui_export_revoke_is_deferred() {
+    let ui = include_str!("../src/ui.html");
+    assert_eq!(
+        ui.matches("URL.revokeObjectURL(url)").count(),
+        1,
+        "exactly one revoke call site for the download blob"
+    );
+    let deferred = "function scheduleExportRevoke(url) {
+  setTimeout(function () { URL.revokeObjectURL(url); }, EXPORT_REVOKE_DELAY_MS);
+}";
+    assert!(
+        ui.contains(deferred),
+        "revoke must be scheduled deferred, not run synchronously after a.click()"
+    );
+}
+
 #[test]
 fn ui_has_no_external_urls() {
     let ui = include_str!("../src/ui.html").replace("http://www.w3.org/2000/svg", "");

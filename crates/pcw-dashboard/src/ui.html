@@ -1217,6 +1217,16 @@ var exportError = $("export-error");
 var exportBusy = false;
 // Literal routes, one per menu item — the guard test pins these paths.
 var exportRoutes = { xlsx: "/api/export/xlsx", csv: "/api/export/csv" };
+// Chrome keeps streaming the blob into the download after a.click();
+// revoking the object URL synchronously (or while that copy is in
+// flight) can abort the download mid-spool — observed as truncated
+// multi-MB files on disk. Defer the revoke well past the spool window
+// so the URL is still always released, just not instantly.
+var EXPORT_REVOKE_DELAY_MS = 30000;
+
+function scheduleExportRevoke(url) {
+  setTimeout(function () { URL.revokeObjectURL(url); }, EXPORT_REVOKE_DELAY_MS);
+}
 
 function closeExport() {
   exportMenu.classList.add("hidden");
@@ -1255,9 +1265,14 @@ async function runExport(fmt) {
     a.href = url;
     a.download = match ? match[1] : "pcw-export";
     document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    try {
+      a.click();
+    } finally {
+      // Revoke stays guaranteed even if click() throws — but deferred
+      // (scheduleExportRevoke), never synchronously on the download path.
+      a.remove();
+      scheduleExportRevoke(url);
+    }
     closeExport();
   } catch (err) {
     showExportError(err.message);
