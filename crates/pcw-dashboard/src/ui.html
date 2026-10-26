@@ -148,6 +148,46 @@
   }
   .btn-reset:hover { background: #ececf1; color: var(--ink); }
 
+  /* ---- export menu ---- */
+  .btn-export {
+    display: inline-flex; align-items: center; gap: 7px;
+    background: var(--card); color: var(--ink); border: 1px solid var(--hair);
+    font: 600 13px/1 var(--font); padding: 10px 16px; border-radius: var(--r-pill);
+    cursor: pointer; box-shadow: var(--sh-pill); transition: transform .15s var(--ease), box-shadow .15s;
+  }
+  .btn-export:hover { transform: translateY(-1px); box-shadow: var(--sh-lift); }
+  .btn-export:active { transform: translateY(0); }
+  .btn-export svg { color: var(--ink-3); flex: none; }
+  .export { position: relative; display: inline-flex; }
+  .export-menu {
+    position: absolute; top: calc(100% + 6px); left: 0; z-index: 40;
+    min-width: 190px; background: var(--card); border: 1px solid var(--hair);
+    border-radius: 14px; box-shadow: var(--sh-lift); padding: 5px;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .export-item {
+    display: flex; align-items: center; width: 100%; text-align: left;
+    background: none; border: none; border-radius: 9px;
+    font: 500 13px/1 var(--font); color: var(--ink); padding: 9px 11px;
+    cursor: pointer; transition: background .13s, color .13s;
+  }
+  .export-item:hover { background: #f0f3fa; color: var(--cobalt); }
+  .export-item:disabled { color: var(--ink-3); cursor: default; }
+  .export-busy {
+    display: none; align-items: center; padding: 9px 11px;
+    font: 500 13px/1 var(--font); color: var(--ink-2);
+  }
+  .export-menu.busy .export-item { display: none; }
+  .export-menu.busy .export-busy { display: flex; }
+  .export-error {
+    flex: 1 1 100%; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+    background: var(--danger-soft); border: 1px solid #fca5a5;
+    border-radius: var(--r-pill); padding: 8px 14px;
+    font-size: 12.5px; color: #991b1b;
+  }
+  .export-error b { color: #7f1d1d; }
+  .export-error .detail { font-family: var(--mono); font-size: 11.5px; color: #b91c1c; word-break: break-word; }
+
   /* ---- page ---- */
   main { padding: 26px 26px 44px; }
   .page-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
@@ -386,6 +426,19 @@
       </select>
     </label>
     <button type="submit" class="btn-apply">Apply</button>
+    <div class="export">
+      <button type="button" id="f-export" class="btn-export" aria-haspopup="menu" aria-expanded="false">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+          <path d="M8 2v7M5.2 6.2 8 9l2.8-2.8M2.5 12.5h11" stroke-linecap="round" stroke-linejoin="round"></path>
+        </svg>Export
+      </button>
+      <div id="export-menu" class="export-menu hidden" role="menu">
+        <button type="button" class="export-item" role="menuitem" data-fmt="xlsx">Excel (.xlsx)</button>
+        <button type="button" class="export-item" role="menuitem" data-fmt="csv">CSV bundle (.zip)</button>
+        <div class="export-busy" role="status">Preparing&hellip;</div>
+      </div>
+    </div>
+    <div id="export-error" class="export-error hidden"></div>
     <button type="button" id="f-reset" class="btn-reset">Reset</button>
   </form>
 
@@ -1136,10 +1189,12 @@ $("nav-context").addEventListener("click", function () {
 });
 $("filters").addEventListener("submit", function (event) {
   event.preventDefault();
+  $("export-error").classList.add("hidden");
   showView(state.view);
 });
 $("f-reset").addEventListener("click", function () {
   resetFilters();
+  $("export-error").classList.add("hidden");
   showView(state.view);
 });
 $("stop").addEventListener("click", function () {
@@ -1152,6 +1207,93 @@ $("stop").addEventListener("click", function () {
     n.appendChild(el("div", undefined, "The server has exited — your data is untouched. Close this window."));
     v.appendChild(n);
   });
+});
+
+/* ---- export: downloads the current view's data ---- */
+
+var exportBtn = $("f-export");
+var exportMenu = $("export-menu");
+var exportError = $("export-error");
+var exportBusy = false;
+// Literal routes, one per menu item — the guard test pins these paths.
+var exportRoutes = { xlsx: "/api/export/xlsx", csv: "/api/export/csv" };
+
+function closeExport() {
+  exportMenu.classList.add("hidden");
+  exportBtn.setAttribute("aria-expanded", "false");
+}
+
+function showExportError(message) {
+  exportError.replaceChildren();
+  exportError.appendChild(el("b", undefined, "Export failed."));
+  exportError.appendChild(document.createTextNode(
+    " Retry from the Export menu; if it keeps failing, check pcw-agent and this dashboard are running."));
+  exportError.appendChild(el("span", "detail", message));
+  exportError.classList.remove("hidden");
+}
+
+async function runExport(fmt) {
+  if (exportBusy) return;
+  exportBusy = true;
+  exportMenu.classList.add("busy");
+  exportError.classList.add("hidden");
+  var items = exportMenu.querySelectorAll(".export-item");
+  for (var i = 0; i < items.length; i++) items[i].disabled = true;
+  try {
+    // The export must match the current view: same filter string as /api/*.
+    var res = await fetch(exportRoutes[fmt] + "?" + query());
+    if (!res.ok) {
+      var body = {};
+      try { body = await res.json(); } catch (e) { body = {}; }
+      throw new Error(body.error || ("HTTP " + res.status));
+    }
+    var blob = await res.blob();
+    // Filename comes from the server, never built here.
+    var match = /filename=([^;\s]+)/.exec(res.headers.get("Content-Disposition") || "");
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = match ? match[1] : "pcw-export";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    closeExport();
+  } catch (err) {
+    showExportError(err.message);
+  } finally {
+    exportBusy = false;
+    exportMenu.classList.remove("busy");
+    for (i = 0; i < items.length; i++) items[i].disabled = false;
+  }
+}
+
+exportBtn.addEventListener("click", function (event) {
+  event.stopPropagation();
+  if (exportMenu.classList.contains("hidden")) {
+    exportMenu.classList.remove("hidden");
+    exportBtn.setAttribute("aria-expanded", "true");
+  } else {
+    closeExport();
+  }
+});
+exportMenu.addEventListener("click", function (event) {
+  var item = event.target.closest(".export-item");
+  if (!item || item.disabled) return;
+  event.stopPropagation();
+  runExport(item.getAttribute("data-fmt"));
+});
+document.addEventListener("click", function (event) {
+  if (exportMenu.classList.contains("hidden")) return;
+  if (!exportMenu.contains(event.target) && !exportBtn.contains(event.target)) {
+    closeExport();
+  }
+});
+document.addEventListener("keydown", function (event) {
+  if (event.key !== "Escape") return;
+  var wasOpen = !exportMenu.classList.contains("hidden");
+  closeExport();
+  if (wasOpen) exportBtn.focus();
 });
 
 defaultDates();

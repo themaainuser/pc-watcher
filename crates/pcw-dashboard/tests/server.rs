@@ -316,6 +316,23 @@ fn shutdown_endpoint_stops_server() {
     );
 }
 
+// Export menu wiring (SDD 2026-10-26-pc-watcher-export, task 3): the UI must
+// fetch its downloads from the two server routes by their literal paths,
+// sending the same filter query the view uses, so an export always matches
+// the current view.
+#[test]
+fn ui_pins_export_paths() {
+    let ui = include_str!("../src/ui.html");
+    assert!(
+        ui.contains("/api/export/xlsx"),
+        "ui.html must wire the xlsx export route"
+    );
+    assert!(
+        ui.contains("/api/export/csv"),
+        "ui.html must wire the csv export route"
+    );
+}
+
 #[test]
 fn ui_has_no_external_urls() {
     let ui = include_str!("../src/ui.html").replace("http://www.w3.org/2000/svg", "");
