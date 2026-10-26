@@ -83,7 +83,7 @@ retention_days = 10
 resolve_dns = true              # reverse-DNS fallback (makes PTR queries)
 capture_dns_names = true        # names from Windows DNS client answers (no traffic)
 capture_window_titles = true    # owner decision: on
-export_folder = "G:\\My Drive\\PC-Watcher"
+export_folder = "D:\\PC-Watcher"
 export_schedule = "weekly"
 dashboard_port = 7411
 udp_rate_cap = 0                # 0 = off; thinning fallback, §4.1

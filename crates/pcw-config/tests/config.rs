@@ -26,7 +26,7 @@ fn creates_default_config_with_spec_values() {
     assert!(cfg.resolve_dns);
     assert!(cfg.capture_dns_names);
     assert!(cfg.capture_window_titles);
-    assert_eq!(cfg.export_folder, PathBuf::from("G:\\My Drive\\PC-Watcher"));
+    assert_eq!(cfg.export_folder, PathBuf::from("D:\\PC-Watcher"));
     assert_eq!(cfg.export_schedule, "weekly");
     assert_eq!(cfg.dashboard_port, 7411);
     assert_eq!(cfg.udp_rate_cap, 0);
@@ -45,7 +45,7 @@ fn reloads_edited_values() {
     assert!(cfg.resolve_dns);
     assert!(cfg.capture_dns_names);
     assert!(cfg.capture_window_titles);
-    assert_eq!(cfg.export_folder, PathBuf::from("G:\\My Drive\\PC-Watcher"));
+    assert_eq!(cfg.export_folder, PathBuf::from("D:\\PC-Watcher"));
     assert_eq!(cfg.export_schedule, "weekly");
     assert_eq!(cfg.dashboard_port, 7411);
     assert_eq!(cfg.udp_rate_cap, 0);
