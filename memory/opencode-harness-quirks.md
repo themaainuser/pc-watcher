@@ -1,0 +1,7 @@
+# OpenCode harness quirks
+
+- 2026-10-24: subagent dispatches can die mid-flight with `Free usage limit reached` (tool.execution error). The agent may have left PARTIAL UNCOMMITTED work in the working tree (observed: a fix-round agent left 6 modified files + 1 new file before dying). Always run `git status`/`git log` after such a failure — the repo state is authoritative, and leftover work may be near-complete: verify it against the findings, run the gates yourself, then commit rather than redoing from scratch.
+- 2026-10-24: a server restart aborted a dispatch mid-flight earlier in the same project — same recovery rule: re-check `git log`/`git status` after any interruption before re-dispatching.
+- 2026-10-24: conversation checkpoints preserve the full dispatch history (SHAs, verdicts, flags) — after resuming from a checkpoint, re-read the ledger + task report files from disk instead of trusting the summary for exact details.
+- 2026-10-24: on Windows/PowerShell, cargo piped through ANY cmdlet reports a spurious tool "Exited with code 1" whenever cargo writes to stderr (warnings, progress) — `NativeCommandError` noise. Gate success on `$LASTEXITCODE`, not the shell tool's exit field; three separate reviewer agents hit and independently discounted this.
+- 2026-10-24: `memory/` sits at the workspace root and is UNTRACKED (not gitignored) — subagents deliberately exclude it from commits; keep it that way or add it to .gitignore before any real commit of the repo.

@@ -1,5 +1,6 @@
-// pcw-agent binary: `--install`/`--uninstall` CLI, otherwise the collector
-// agent itself — the thread topology and tray wiring of plan Task 13.
+// pcw-agent binary: the collector agent itself — manual start only (with a
+// single-instance guard and UAC self-elevation), the thread topology and
+// tray wiring of plan Task 13.
 
 #![windows_subsystem = "windows"]
 
@@ -39,32 +40,37 @@ const META_LAST_EXPORT_FAILURE: &str = "last_export_failure";
 /// agent.log rotation: 5 MB, one old copy (spec §5).
 const LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
 
-fn main() {
-    match std::env::args().nth(1).as_deref() {
-        Some("--install") => report_cli(pcw_agent::install::install(), true),
-        Some("--uninstall") => report_cli(pcw_agent::install::uninstall(), false),
-        _ => run_agent(),
-    }
-}
+/// Mutex name proving "this is the only running agent" (Local session
+/// namespace; the OS drops it when the process dies, crash included).
+const INSTANCE_NAME: &str = "PC-Watcher-Agent";
 
-/// `--install`/`--uninstall` CLI: attach to the calling console, print the
-/// result, exit 0 on success / 1 on failure.
-fn report_cli(result: Result<(), String>, installing: bool) {
-    attach_parent_console();
-    match result {
-        Ok(()) => println!(
-            "PC-Watcher task {}.",
-            if installing {
-                "installed"
-            } else {
-                "uninstalled"
-            }
-        ),
-        Err(e) => {
-            println!("error: {e}");
+fn main() {
+    // Manual start is the only mode (no scheduled task): a second click
+    // must not spawn a duplicate agent — its startup cleanup would stop the
+    // first agent's ETW session and silently break capture.
+    let instance = match pcw_foreground::InstanceLock::acquire(INSTANCE_NAME) {
+        Some(lock) => lock,
+        None => {
+            pcw_foreground::warn_user("PC-Watcher is already running (see the tray icon).");
+            return;
+        }
+    };
+    // Capture needs an admin token and no scheduled task supplies one, so
+    // an unelevated start re-launches itself (UAC prompt) and exits; the
+    // elevated copy acquires the instance lock again on its way in.
+    if !pcw_foreground::is_elevated() {
+        drop(instance); // the elevated copy must be able to acquire the name
+        if let Err(e) = pcw_foreground::relaunch_elevated() {
+            pcw_foreground::warn_user(&format!(
+                "PC-Watcher needs administrator rights to record network activity ({e})."
+            ));
             std::process::exit(1);
         }
+        return;
     }
+    run_agent();
+    // `instance` stays alive for the whole run: holding the mutex is what
+    // makes the next double-click show "already running".
 }
 
 /// Poison-tolerant lock helper for the store and the shared Supervisor: a

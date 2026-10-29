@@ -1,18 +1,22 @@
 //! Small Win32 helpers for the agent layers: console attach, elevation check,
-//! free-disk-space query and the `TaskbarCreated` message filter. Each helper
-//! maps a Win32 failure to `None`/`false`/no-op rather than panicking.
+//! free-disk-space query, the `TaskbarCreated` message filter and the
+//! manual-start guards (single instance, UAC self-relaunch, message box).
+//! Each helper maps a Win32 failure to `None`/`false`/no-op rather than
+//! panicking.
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
 use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
-use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, OpenProcessToken};
+use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    ChangeWindowMessageFilter, MSGFLT_ADD, RegisterWindowMessageW,
+    ChangeWindowMessageFilter, MB_ICONWARNING, MB_OK, MB_SETFOREGROUND, MSGFLT_ADD, MessageBoxW,
+    RegisterWindowMessageW, SW_SHOWNORMAL,
 };
 use windows::core::{PCWSTR, w};
 
@@ -78,4 +82,102 @@ pub fn allow_taskbar_created_message() {
 /// `OsStr` as a NUL-terminated UTF-16 buffer.
 fn null_terminated_utf16(value: &OsStr) -> Vec<u16> {
     value.encode_wide().chain(std::iter::once(0)).collect()
+}
+
+/// Named-mutex guard proving "this is the only running copy": [`acquire`]
+/// returns `None` when another process already holds `name`. The kernel
+/// closes the handle on any exit — including a crash — so the lock can
+/// never outlive its process.
+pub struct InstanceLock(HANDLE);
+
+impl InstanceLock {
+    /// Acquires `name`, or `None` when another copy already holds it. A
+    /// `CreateMutexW` failure (e.g. out of memory) fails OPEN — refusing to
+    /// start the only copy would be worse than risking a duplicate.
+    #[must_use]
+    pub fn acquire(name: &str) -> Option<Self> {
+        let wide = null_terminated_utf16(OsStr::new(name));
+        unsafe {
+            let Ok(mutex) = CreateMutexW(None, false, PCWSTR::from_raw(wide.as_ptr())) else {
+                return Some(Self(HANDLE(std::ptr::null_mut())));
+            };
+            if GetLastError() == ERROR_ALREADY_EXISTS {
+                let _ = CloseHandle(mutex);
+                return None;
+            }
+            Some(Self(mutex))
+        }
+    }
+}
+
+impl Drop for InstanceLock {
+    fn drop(&mut self) {
+        if !self.0.is_invalid() {
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+}
+
+/// Relaunches the current exe elevated via the UAC prompt (`runas`), for the
+/// manual-start flow: ETW capture needs an admin token and there is no
+/// scheduled task to supply one. `Err` covers the user declining the prompt
+/// (`ERROR_CANCELLED`) and every other `ShellExecuteW` failure.
+pub fn relaunch_elevated() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("cannot locate the running exe: {e}"))?;
+    let file = null_terminated_utf16(exe.as_os_str());
+    let verb = null_terminated_utf16(OsStr::new("runas"));
+    unsafe {
+        let result = ShellExecuteW(
+            None,
+            PCWSTR::from_raw(verb.as_ptr()),
+            PCWSTR::from_raw(file.as_ptr()),
+            None,
+            None,
+            SW_SHOWNORMAL,
+        );
+        // ShellExecuteW reports failure as a return value <= 32.
+        let code = result.0 as isize;
+        if code <= 32 {
+            return Err(format!("ShellExecuteW(runas) failed with code {code}"));
+        }
+    }
+    Ok(())
+}
+
+/// Best-effort modal warning for a GUI-subsystem app (no console): used for
+/// "already running" and "elevation declined". A failed box is ignored —
+/// there is no better fallback than the tray/log the caller already has.
+pub fn warn_user(message: &str) {
+    let wide = null_terminated_utf16(OsStr::new(message));
+    unsafe {
+        let _ = MessageBoxW(
+            None,
+            PCWSTR::from_raw(wide.as_ptr()),
+            w!("PC-Watcher"),
+            MB_OK | MB_ICONWARNING | MB_SETFOREGROUND,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InstanceLock;
+
+    #[test]
+    fn second_lock_on_the_same_name_is_refused() {
+        let name = format!("PC-Watcher-Test-{}", std::process::id());
+        let first = InstanceLock::acquire(&name);
+        assert!(first.is_some(), "fresh name must be acquirable");
+        assert!(
+            InstanceLock::acquire(&name).is_none(),
+            "a held name must refuse a second lock"
+        );
+        drop(first);
+        assert!(
+            InstanceLock::acquire(&name).is_some(),
+            "a released name must be acquirable again"
+        );
+    }
 }

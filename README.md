@@ -1,7 +1,8 @@
 # PC-Watcher
 
-An always-on Windows tray application (Rust) that records per-process network
+A Windows tray application (Rust) that records per-process network
 connection metadata into SQLite, with an on-demand localhost dashboard.
+Started by hand: it runs only while it is open (no auto-start).
 
 ## Workspace layout
 
@@ -47,31 +48,38 @@ linker = "rust-lld"
 No external `lld-link` install is required; `rust-lld` acts as the MSVC
 `link.exe` compatible driver here.
 
-## Install / uninstall
+## Quick start (new machine)
 
-Install once from an **elevated** PowerShell (ETW needs it):
+Prerequisites: Windows 10/11, a Rust toolchain
+([rustup](https://rustup.rs) — no external linker is needed; the build
+uses `rust-lld` from the toolchain), and an account that can approve UAC
+prompts (capture reads the Windows ETW kernel session, which needs an
+admin token).
 
-```powershell
-cargo build --release
-.\target\release\pcw-agent.exe --install
-```
-
-- The command registers a scheduled task named `PC-Watcher` via
-  `schtasks /Create /TN PC-Watcher /XML <file> /F` and starts it immediately.
-- The task has a logon trigger for the installing user, `InteractiveToken`,
-  `RunLevel = HighestAvailable`; it ignores battery state,
-  `ExecutionTimeLimit = PT0S`, priority 5, and `RestartOnFailure` every
-  1 min (3 times).
-- It copies `pcw-agent.exe` and the sibling `pcw-dash.exe` into
-  `%LOCALAPPDATA%\PC-Watcher\bin\` and points the task there — the task
-  never runs from the build folder.
-- At logon the agent starts elevated with no UAC prompt and no console
-  window (GUI subsystem), showing the tray icon.
-- `pcw-agent.exe --uninstall` ends and deletes the task; data, config and
-  log stay in place.
+1. Get the source. The project is source-only — there are no published
+   binaries — and it must sit in a plain local folder (see the OneDrive
+   rule below).
+2. Build: `cargo build --release`.
+3. Start the agent: double-click `target\release\pcw-agent.exe` (or run it
+   from a terminal). A UAC prompt appears **by design** — confirm it and
+   the tray icon shows up. There is no install step and no auto-start: the
+   agent runs only while you keep it running. **Exit** in the tray stops
+   it; if it crashes, nothing restarts it.
+4. Double-clicking the exe again while it runs shows "PC-Watcher is
+   already running" instead of starting a second copy (a duplicate would
+   break the first one's capture).
+5. After a few minutes of normal use, tray → **Open Dashboard**: the
+   browser opens `http://127.0.0.1:7411/` with what has been recorded so
+   far. Exports (pill or scheduled) write to `export_folder` (see below).
 
 Data lands in `%LOCALAPPDATA%\PC-Watcher\`: `data.db` (SQLite, WAL),
-`config.toml`, `agent.log` (rotated at 5 MB, one old copy kept).
+`config.toml`, `agent.log` (rotated at 5 MB, one old copy kept). To remove
+the app completely: tray **Exit**, then delete that folder.
+
+**Migrating from an older build** (one that registered the `PC-Watcher`
+scheduled task): once, from an elevated terminal, run
+`schtasks /Delete /TN PC-Watcher /F` and delete
+`%LOCALAPPDATA%\PC-Watcher\bin\`; data, config and log stay in place.
 
 ## Configuration reference
 
@@ -150,7 +158,7 @@ and DB growth. No numbers are published here until measured.
 ## Smoke checklists (manual, owner-run — agents never run these)
 
 Automated tests cannot lock a screen, sleep the machine or unplug a
-charger, so these stay manual. They can be run once after install.
+charger, so these stay manual. They can be run once after the first start.
 
 ### Foreground hooks (Task 10)
 
@@ -180,13 +188,13 @@ Then, during the 90-second window it prints signals for:
       `run_session` returns and the example prints it.
 - [ ] Hibernate/resume during a session → record the behavior.
 
-### Agent install & tray (Task 13)
+### Agent run & tray (Task 13)
 
-- [ ] Elevated `pcw-agent.exe --install` succeeds;
-      `schtasks /Query /TN PC-Watcher /XML` shows PT0S, both battery
-      settings false, HighestAvailable, both exes under
-      `%LOCALAPPDATA%\PC-Watcher\bin\`.
-- [ ] Sign out/in → agent starts with no UAC prompt and no console window.
+- [ ] Double-click → UAC prompt → tray icon appears, no console window.
+- [ ] Second double-click while running → "PC-Watcher is already running",
+      no second process.
+- [ ] Declining the UAC prompt → explanatory message box, nothing stays
+      running.
 - [ ] Tray icon with exactly five items: Open Dashboard, Pause/Resume,
       Export now, Open data folder, Exit.
 - [ ] Unplug charger → agent keeps running.
@@ -197,14 +205,14 @@ Then, during the 90-second window it prints signals for:
 - [ ] Export now → dated folder in `export_folder` (or the local-folder
       fallback above when `G:` is not visible elevated).
 - [ ] `agent.log` has start-up lines.
-- [ ] `--uninstall` removes the task; the data folder remains.
+- [ ] Tray **Exit** stops the agent; the data folder remains.
 
 ## Full end-to-end acceptance (owner manual — NEVER RUN by agents)
 
 Brief Step 2 items 1–8 for Task 15; overall acceptance of the product:
 
-1. [ ] `pcw-agent --install` (elevated), sign out/in → no UAC prompt, no
-       console window, tray present, idle footprint within spec §12.
+1. [ ] Start the agent (double-click + UAC) → no console window, tray
+       present, idle footprint within spec §12.
 2. [ ] Browse for 10 minutes → tray **Open Dashboard** → the browser opens
        as the normal user (Task Manager "Elevated" column = No); Overview
        shows the activity; drill-downs work; Usage shows sessions with the
@@ -216,8 +224,8 @@ Brief Step 2 items 1–8 for Task 15; overall acceptance of the product:
        `LockApp.exe` session.
 5. [ ] **Export now** → the five files in the export folder; titles intact;
        counters present.
-6. [ ] Kill `pcw-agent.exe` in Task Manager → Task Scheduler restarts it
-       within ~1 min (`RestartOnFailure`); `agent.log` shows a leftover ETW
+6. [ ] Kill `pcw-agent.exe` in Task Manager → it stays dead (no
+       auto-restart). Start it again → `agent.log` shows a leftover ETW
        session stopped and the open session recovered.
 7. [ ] From another LAN device, `http://<lan-ip>:7411` is unreachable while
        the dashboard runs.

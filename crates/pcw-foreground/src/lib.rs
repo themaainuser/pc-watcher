@@ -8,7 +8,10 @@ pub mod sys;
 mod tracker;
 
 pub use os::{HookHandle, OsError, start_hooks};
-pub use sys::{allow_taskbar_created_message, attach_parent_console, free_disk_bytes, is_elevated};
+pub use sys::{
+    InstanceLock, allow_taskbar_created_message, attach_parent_console, free_disk_bytes,
+    is_elevated, relaunch_elevated, warn_user,
+};
 pub use tracker::{
     LOCK_APP, OpenSession, SessionSignal, SessionTracker, TITLE_MIN_MS, TrackerOutput,
 };
